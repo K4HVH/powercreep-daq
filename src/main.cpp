@@ -120,6 +120,17 @@ void daqTask(void* parameter) {
                 uint8_t i = enabled_channels[idx];
                 const ChannelConfig& ch = channels[i];
 
+                // Check if it's time to sample this channel
+                // Base rate is 1000Hz. 
+                // Interval = 1000 / sample_rate
+                // e.g. 500Hz -> 1000/500 = 2 -> sample every 2nd tick
+                uint32_t interval = 1000 / ch.default_sample_rate_hz;
+                if (interval == 0) interval = 1; // Safety
+                
+                if (state.sim_time % interval != 0) {
+                    continue;
+                }
+
                 uint16_t value;
                 if (ch.is_analog) {
                     if (ch.gpio_pin == 255) {

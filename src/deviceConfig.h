@@ -112,8 +112,8 @@ struct OutputConfig {
 ChannelConfig channels[] = {
     // Real ADC channels (ESP32 ADC1: GPIO32-39)
     // 11dB attenuation provides 0-2.45V range (suitable for 3.3V logic with voltage divider)
-    {0, "ADC0_GPIO32", "V", 1000, true, 32, true, PIN_MODE_INPUT, ADC_ATTEN_11DB},
-    {1, "ADC1_GPIO33", "V", 1000, true, 33, true, PIN_MODE_INPUT, ADC_ATTEN_11DB},
+    {0, "ADC0_GPIO32", "V", 500, true, 32, true, PIN_MODE_INPUT, ADC_ATTEN_11DB},   // Changed to 500Hz
+    {1, "ADC1_GPIO33", "V", 100, true, 33, true, PIN_MODE_INPUT, ADC_ATTEN_11DB},   // Changed to 100Hz
     {2, "ADC2_GPIO34", "V", 1000, true, 34, true, PIN_MODE_INPUT, ADC_ATTEN_11DB},
     {3, "ADC3_GPIO35", "V", 1000, true, 35, true, PIN_MODE_INPUT, ADC_ATTEN_11DB},
     {4, "ADC4_GPIO36", "V", 1000, true, 36, true, PIN_MODE_INPUT, ADC_ATTEN_11DB},
