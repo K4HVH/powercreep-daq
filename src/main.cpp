@@ -59,7 +59,11 @@ struct DaqState {
 volatile bool DRAM_ATTR g_daq_sample_flag = false;
 
 void IRAM_ATTR daqTimerISR() {
-    g_daq_sample_flag = true;
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    vTaskNotifyGiveFromISR(daqTaskHandle, &xHigherPriorityTaskWoken);
+    if (xHigherPriorityTaskWoken) {
+        portYIELD_FROM_ISR();
+    }
 }
 
 uint16_t IRAM_ATTR generateSimulatedValue(uint8_t channel_idx, uint32_t sim_time) {
@@ -108,9 +112,8 @@ void daqTask(void* parameter) {
     timerAlarmEnable(state.timer);
 
     while (true) {
-        // Wait for timer flag
-        if (g_daq_sample_flag) {
-            g_daq_sample_flag = false;
+        // Wait for timer notification
+        if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY)) {
 
             // Sample all enabled channels (using pre-computed list for speed)
             for (uint8_t idx = 0; idx < num_enabled_channels; idx++) {
@@ -152,9 +155,6 @@ void daqTask(void* parameter) {
 
             state.sim_time++;
         }
-
-        // Yield to other tasks
-        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
@@ -200,6 +200,8 @@ void commTask(void* parameter) {
     unsigned long last_heartbeat = millis();
 
     while (true) {
+        bool busy = false;
+
         // Process incoming serial data
         parser.processSerial();
 
@@ -211,7 +213,8 @@ void commTask(void* parameter) {
 
         // Check for outgoing data batches from DAQ task
         DataBatchMessage msg;
-        if (xQueueReceive(dataBatchQueue, &msg, 0) == pdTRUE) {
+        // Process all available batches to maximize throughput
+        while (xQueueReceive(dataBatchQueue, &msg, 0) == pdTRUE) {
             // Build and send DATA_BATCH frame
             FrameBuilder frame;
             frame.begin(DATA_BATCH);
@@ -224,13 +227,15 @@ void commTask(void* parameter) {
             }
 
             frame.send();
+            busy = true;
         }
 
-        // Small delay to prevent watchdog timeout
-        vTaskDelay(pdMS_TO_TICKS(1));
+        // Only delay if we didn't do any work to save power/CPU
+        if (!busy) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
     }
 }
-
 // ======================== ARDUINO SETUP/LOOP ========================
 
 void setup() {
