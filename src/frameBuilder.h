@@ -74,16 +74,6 @@ public:
         }
     }
 
-    // Helper to get payload length (for debug)
-    uint8_t getPayloadLength() const {
-        return payload_len_;
-    }
-
-    // Helper to copy payload (for debug)
-    void copyPayloadTo(uint8_t* dest) const {
-        memcpy(dest, payload_, payload_len_);
-    }
-
     // Send the frame over Serial (optimized for single write)
     void send() {
         // Frame structure: [SYNC1][SYNC2][LEN_LOW][LEN_HIGH][TYPE][PAYLOAD][CRC16]

@@ -34,7 +34,7 @@ struct ChannelConfig {
     uint16_t default_sample_rate_hz;
     AcquisitionMethod acquisition_method;  // v3: GPIO, ADC, HX711, SPI ADC, I2C ADC, UART
     DataType data_type;                   // v3: 8-bit unsigned/signed, 16-bit unsigned/signed, 24-bit signed, 32-bit unsigned/signed/float
-    uint8_t gpio_pin;  // Primary GPIO pin number, 255 for simulated
+    uint8_t gpio_pin;  // Primary GPIO pin number
     bool enabled;
 
     // Pin configuration (compile-time settings)
@@ -72,7 +72,7 @@ struct OutputConfig {
  * │ sample_rate         : Default sample rate in Hz                         │
  * │ acquisition_method  : v3 acquisition type (see below)                   │
  * │ data_type           : v3 sample value encoding (see below)              │
- * │ gpio_pin            : GPIO pin number (255 = simulated/no pin)          │
+ * │ gpio_pin            : GPIO pin number                                    │
  * │ enabled             : true = channel active, false = disabled           │
  * └─────────────────────────────────────────────────────────────────────────┘
  *
@@ -200,8 +200,7 @@ constexpr uint8_t NUM_OUTPUTS = sizeof(outputs) / sizeof(outputs[0]);
 // Initialize GPIO pins for digital inputs with configured pull resistors
 void initializeDigitalInputs() {
     for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
-        if (channels[i].acquisition_method == ACQ_GPIO && channels[i].gpio_pin != 255) {
-            // Apply configured pin mode (pull-up, pull-down, or none)
+        if (channels[i].acquisition_method == ACQ_GPIO) {
             switch (channels[i].pin_mode) {
                 case PIN_MODE_INPUT_PULLUP:
                     pinMode(channels[i].gpio_pin, INPUT_PULLUP);
@@ -221,8 +220,7 @@ void initializeDigitalInputs() {
 // Initialize ADC channels with configured attenuation
 void initializeADC() {
     for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
-        if (channels[i].acquisition_method == ACQ_ADC && channels[i].gpio_pin != 255) {
-            // Map our attenuation enum to ESP32 ADC attenuation
+        if (channels[i].acquisition_method == ACQ_ADC) {
             adc_atten_t esp_atten;
             switch (channels[i].adc_attenuation) {
                 case ADC_ATTEN_0DB:
@@ -240,8 +238,6 @@ void initializeADC() {
                     break;
             }
 
-            // Set attenuation for this pin
-            // Note: ESP32 requires pin-to-channel mapping
             adc1_channel_t adc_channel;
             switch (channels[i].gpio_pin) {
                 case 32: adc_channel = ADC1_CHANNEL_4; break;
@@ -250,7 +246,7 @@ void initializeADC() {
                 case 35: adc_channel = ADC1_CHANNEL_7; break;
                 case 36: adc_channel = ADC1_CHANNEL_0; break;
                 case 39: adc_channel = ADC1_CHANNEL_3; break;
-                default: continue; // Skip if not a valid ADC1 pin
+                default: continue;
             }
 
             adc1_config_channel_atten(adc_channel, esp_atten);
