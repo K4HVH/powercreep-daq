@@ -15,9 +15,11 @@
 // FreeRTOS task handles
 TaskHandle_t commTaskHandle = NULL;
 TaskHandle_t daqTaskHandle = NULL;
+TaskHandle_t sensorPollingTaskHandle = NULL;
 
 // v3: No queue needed - DAQ task sends DATA_BATCH frames directly via Serial
 // This eliminates inter-core communication overhead
+// v3.1: Sensor polling moved to background task to avoid I2C/SPI timeout impact
 
 // Heartbeat state
 Heartbeat heartbeat;
@@ -69,6 +71,9 @@ void daqTask(void* parameter) {
 
     // Initialize acquisition subsystem
     Acquisition::init();
+
+    // Pre-initialize sensors for all enabled channels (removes init overhead from hot path)
+    Acquisition::initializeSensors(channels, NUM_CHANNELS);
 
     // Pre-compute enabled channels list (O(n) optimization)
     for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
@@ -171,6 +176,21 @@ void daqTask(void* parameter) {
     }
 }
 
+// ======================== SENSOR POLLING TASK (Core 0, Background) ========================
+
+// Background task that polls complex sensors (HX711, I2C, SPI) and updates cache.
+// This allows DAQ task to read cached values instantly without I2C/SPI timeout overhead.
+// Runs at low priority so it doesn't interfere with time-critical DAQ or comm tasks.
+void sensorPollingTask(void* parameter) {
+    while (true) {
+        // Poll all enabled complex sensors (handles I2C/SPI timeouts gracefully)
+        Acquisition::pollSensors(channels, NUM_CHANNELS);
+
+        // Yield to other tasks (poll every 10ms - fast enough for even 100Hz sensors)
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
 // ======================== COMMUNICATION TASK (Core 0) ========================
 
 void onFrameReceived(uint8_t frame_type, const uint8_t* payload, uint8_t payload_len) {
@@ -260,6 +280,16 @@ void setup() {
 
     // Create tasks pinned to specific cores
     xTaskCreatePinnedToCore(
+        sensorPollingTask,  // Task function
+        "SensorPoll",       // Task name
+        8192,               // Stack size (bytes)
+        NULL,               // Parameters
+        1,                  // Priority (lowest - background task)
+        &sensorPollingTaskHandle, // Task handle
+        0                   // Core 0 (PRO_CPU) - Background polling
+    );
+
+    xTaskCreatePinnedToCore(
         commTask,           // Task function
         "CommTask",         // Task name
         8192,               // Stack size (bytes)
@@ -274,7 +304,7 @@ void setup() {
         "DaqTask",          // Task name
         8192,               // Stack size (bytes)
         NULL,               // Parameters
-        3,                  // Priority (higher than comm - time-critical)
+        3,                  // Priority (highest - time-critical)
         &daqTaskHandle,     // Task handle
         1                   // Core 1 (APP_CPU) - Data acquisition
     );

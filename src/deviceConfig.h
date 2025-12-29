@@ -26,6 +26,9 @@ enum AdcAttenuation : uint8_t {
     ADC_ATTEN_11DB = 3    // 11dB attenuation (150mV ~ 2450mV) - default
 };
 
+// Forward declare SensorType from acquisition.h
+enum SensorType : uint8_t;
+
 // Channel configuration (Protocol v3)
 struct ChannelConfig {
     uint8_t channel_id;
@@ -47,6 +50,9 @@ struct ChannelConfig {
     uint8_t peripheral_pin2;  // SPI: MOSI, I2C: SCL, UART: TX
     uint8_t peripheral_pin3;  // SPI: MISO
     uint8_t peripheral_pin4;  // SPI: SCK
+
+    // Sensor type for complex acquis methods (HX711, I2C, SPI sensors)
+    uint8_t sensor_type;  // SensorType enum value
 };
 
 // Output pin configuration
@@ -143,26 +149,50 @@ struct OutputConfig {
  * • Use voltage dividers if measuring >2.45V on analog inputs
  */
 
-// 11 Channels: 6 real ADC + 5 digital inputs (v3 format)
-// Format: {id, name, unit, sample_rate, acquisition_method, data_type, gpio_pin, enabled, pin_mode, adc_attenuation, peripheral_pin1-4}
-// Note: Use 255 for unused peripheral pins
+// 15 Channels: 6 ADC + 4 digital + 1 HX711 + 4 I2C/SPI sensors (v3 format)
+// Format: {id, name, unit, sample_rate, acquisition_method, data_type, gpio_pin, enabled, pin_mode, adc_attenuation, peripheral_pin1-4, sensor_type}
+// Note: Use 255 for unused peripheral pins, 0 for SENSOR_NONE
 ChannelConfig channels[] = {
     // Real ADC channels (ESP32 ADC1: GPIO32-39)
     // Using DATA_UINT16 for ESP32 12-bit ADC (0-4095 range)
-    {0, "ADC0_GPIO32", "V", 1000, ACQ_ADC, DATA_UINT16, 32, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255},
-    {1, "ADC1_GPIO33", "V", 1000, ACQ_ADC, DATA_UINT16, 33, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255},
-    {2, "ADC2_GPIO34", "V", 1000, ACQ_ADC, DATA_UINT16, 34, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255},
-    {3, "ADC3_GPIO35", "V", 1000, ACQ_ADC, DATA_UINT16, 35, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255},
-    {4, "ADC4_GPIO36", "V", 1000, ACQ_ADC, DATA_UINT16, 36, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255},
-    {5, "ADC5_GPIO39", "V", 1000, ACQ_ADC, DATA_UINT16, 39, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255},
+    {0, "ADC0_GPIO32", "V", 1000, ACQ_ADC, DATA_UINT16, 32, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
+    {1, "ADC1_GPIO33", "V", 1000, ACQ_ADC, DATA_UINT16, 33, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
+    {2, "ADC2_GPIO34", "V", 1000, ACQ_ADC, DATA_UINT16, 34, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
+    {3, "ADC3_GPIO35", "V", 1000, ACQ_ADC, DATA_UINT16, 35, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
+    {4, "ADC4_GPIO36", "V", 1000, ACQ_ADC, DATA_UINT16, 36, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
+    {5, "ADC5_GPIO39", "V", 1000, ACQ_ADC, DATA_UINT16, 39, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
+
+    // HX711 Load Cell (DOUT=GPIO12, SCK=GPIO13)
+    // Using DATA_INT24 for 24-bit signed load cell values
+    // Sample rate: 10Hz (HX711 hardware limit at gain=128)
+    // v3.1: Enabled by default - background polling task handles timeouts gracefully
+    {6, "LoadCell", "g", 10, ACQ_HX711, DATA_INT24, 12, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 13, 255, 255, 255, 1},
 
     // Digital input channels with pull-up resistors
     // Using DATA_UINT8 for digital inputs (0=LOW, 1=HIGH)
-    {6, "DIN_GPIO12", "", 1000, ACQ_GPIO, DATA_UINT8, 12, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 255, 255, 255, 255},
-    {7, "DIN_GPIO13", "", 1000, ACQ_GPIO, DATA_UINT8, 13, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 255, 255, 255, 255},
-    {8, "DIN_GPIO14", "", 1000, ACQ_GPIO, DATA_UINT8, 14, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 255, 255, 255, 255},
-    {9, "DIN_GPIO15", "", 1000, ACQ_GPIO, DATA_UINT8, 15, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 255, 255, 255, 255},
-    {10, "DIN_GPIO27", "", 1000, ACQ_GPIO, DATA_UINT8, 27, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 255, 255, 255, 255},
+    {7, "DIN_GPIO14", "", 1000, ACQ_GPIO, DATA_UINT8, 14, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
+    {8, "DIN_GPIO15", "", 1000, ACQ_GPIO, DATA_UINT8, 15, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
+    {9, "DIN_GPIO27", "", 1000, ACQ_GPIO, DATA_UINT8, 27, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
+
+    // AHT10 Temperature & Humidity (I2C, address 0x38, SDA=GPIO21, SCL=GPIO22)
+    // Using DATA_FLOAT32 for calibrated values (temp in °C, humidity in %)
+    // Sample rate: 10Hz (sensor has 75ms measurement time)
+    // v3.1: Enabled by default - background polling task handles I2C timeouts gracefully
+    {10, "AHT10_Temp", "C", 10, ACQ_I2C_ADC, DATA_FLOAT32, 21, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 21, 22, 255, 255, 10},
+    {11, "AHT10_Humidity", "%", 10, ACQ_I2C_ADC, DATA_FLOAT32, 21, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 21, 22, 255, 255, 10},
+
+    // BMP280 Pressure & Temperature (I2C, address 0x76, SDA=GPIO21, SCL=GPIO22)
+    // Using DATA_FLOAT32 for calibrated values (temp in °C, pressure in Pa)
+    // Sample rate: 50Hz (sensor has ~10ms measurement time at lowest oversampling)
+    // v3.1: Enabled by default - background polling task handles I2C timeouts gracefully
+    {12, "BMP280_Temp", "C", 50, ACQ_I2C_ADC, DATA_FLOAT32, 21, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 21, 22, 255, 255, 11},
+    {13, "BMP280_Pressure", "Pa", 50, ACQ_I2C_ADC, DATA_FLOAT32, 21, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 21, 22, 255, 255, 11},
+
+    // MAX6675 Thermocouple (SPI, CS=GPIO5, SCK=GPIO18, MISO=GPIO19)
+    // Using DATA_FLOAT32 for temperature in °C (0.25°C resolution)
+    // Sample rate: 4Hz (MAX6675 has 220ms conversion time)
+    // v3.1: Enabled by default - background polling task handles SPI timeouts gracefully
+    {14, "MAX6675_Temp", "C", 4, ACQ_SPI_ADC, DATA_FLOAT32, 5, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 5, 255, 255, 255, 20},
 };
 
 constexpr uint8_t NUM_CHANNELS = sizeof(channels) / sizeof(channels[0]);
@@ -173,6 +203,9 @@ OutputConfig outputs[] = {
     {2,  "LED_Builtin", OUTPUT_CAP_GPIO},
 
     // Peripheral-reserved pins (v3: firmware-controlled, cannot be controlled by user via GPIO/PWM/DAC)
+    // HX711 SCK
+    {13, "HX711_SCK", OUTPUT_CAP_PERIPHERAL},
+
     // I2C (default ESP32 pins)
     {21, "I2C_SDA", OUTPUT_CAP_PERIPHERAL},
     {22, "I2C_SCL", OUTPUT_CAP_PERIPHERAL},
