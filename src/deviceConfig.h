@@ -164,8 +164,6 @@ ChannelConfig channels[] = {
 
     // HX711 Load Cell (DOUT=GPIO12, SCK=GPIO13)
     // Using DATA_INT24 for 24-bit signed load cell values
-    // Sample rate: 10Hz (HX711 hardware limit at gain=128)
-    // v3.1: Enabled by default - background polling task handles timeouts gracefully
     {6, "LoadCell", "g", 10, ACQ_HX711, DATA_INT24, 12, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 13, 255, 255, 255, 1},
 
     // Digital input channels with pull-up resistors
@@ -177,21 +175,21 @@ ChannelConfig channels[] = {
     // AHT10 Temperature & Humidity (I2C, address 0x38, SDA=GPIO21, SCL=GPIO22)
     // Using DATA_FLOAT32 for calibrated values (temp in °C, humidity in %)
     // Sample rate: 10Hz (sensor has 75ms measurement time)
-    // v3.1: Enabled by default - background polling task handles I2C timeouts gracefully
+    // Polled in background task to avoid blocking DAQ task with I2C timeouts
     {10, "AHT10_Temp", "C", 10, ACQ_I2C_ADC, DATA_FLOAT32, 21, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 21, 22, 255, 255, 10},
     {11, "AHT10_Humidity", "%", 10, ACQ_I2C_ADC, DATA_FLOAT32, 21, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 21, 22, 255, 255, 10},
 
     // BMP280 Pressure & Temperature (I2C, address 0x76, SDA=GPIO21, SCL=GPIO22)
     // Using DATA_FLOAT32 for calibrated values (temp in °C, pressure in Pa)
     // Sample rate: 50Hz (sensor has ~10ms measurement time at lowest oversampling)
-    // v3.1: Enabled by default - background polling task handles I2C timeouts gracefully
+    // Polled in background task to avoid blocking DAQ task with I2C timeouts
     {12, "BMP280_Temp", "C", 50, ACQ_I2C_ADC, DATA_FLOAT32, 21, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 21, 22, 255, 255, 11},
     {13, "BMP280_Pressure", "Pa", 50, ACQ_I2C_ADC, DATA_FLOAT32, 21, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 21, 22, 255, 255, 11},
 
     // MAX6675 Thermocouple (SPI, CS=GPIO5, SCK=GPIO18, MISO=GPIO19)
     // Using DATA_FLOAT32 for temperature in °C (0.25°C resolution)
     // Sample rate: 4Hz (MAX6675 has 220ms conversion time)
-    // v3.1: Enabled by default - background polling task handles SPI timeouts gracefully
+    // Polled in background task to avoid blocking DAQ task with SPI timeouts
     {14, "MAX6675_Temp", "C", 4, ACQ_SPI_ADC, DATA_FLOAT32, 5, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 5, 255, 255, 255, 20},
 };
 

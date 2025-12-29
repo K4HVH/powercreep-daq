@@ -40,6 +40,8 @@ private:
     uint8_t dout_pin_;
     uint8_t sck_pin_;
     uint32_t last_value_;
+    int32_t offset_;  // Tare offset
+    static portMUX_TYPE mux;
 
 public:
     void begin(uint8_t dout_pin, uint8_t sck_pin) {
@@ -49,6 +51,45 @@ public:
         pinMode(sck_pin_, OUTPUT);
         digitalWrite(sck_pin_, LOW);
         last_value_ = 0;
+        offset_ = 0;
+
+        // Wait for HX711 to be ready (first conversion after power-on)
+        // HX711 needs time to settle after power-on
+        unsigned long start = millis();
+        while (digitalRead(dout_pin_) == HIGH && (millis() - start) < 2000) {
+            delay(10);
+        }
+
+        // If still not ready after 2 seconds, give up on tare
+        if (digitalRead(dout_pin_) == HIGH) {
+            return;
+        }
+
+        // Now do tare: read and average 10 samples
+        int64_t sum = 0;
+        uint8_t count = 0;
+
+        for (uint8_t i = 0; i < 10; i++) {
+            // Wait for next conversion (up to 200ms at 10Hz)
+            unsigned long wait_start = millis();
+            while (digitalRead(dout_pin_) == HIGH && (millis() - wait_start) < 200) {
+                delay(1);
+            }
+
+            // Read if ready
+            uint32_t value;
+            if (digitalRead(dout_pin_) == LOW && read(value)) {
+                sum += (int32_t)value;
+                count++;
+            }
+
+            delay(10); // Small delay before next sample
+        }
+
+        // Set offset if we got any readings
+        if (count > 0) {
+            offset_ = (int32_t)(sum / count);
+        }
     }
 
     // Non-blocking read - returns true if new value available
@@ -58,7 +99,11 @@ public:
             return false; // Not ready yet
         }
 
-        // Read 24 bits (takes ~50us)
+        // CRITICAL: Disable interrupts during bit-banging
+        // HX711 enters power-down mode if clock pulses are delayed >60µs
+        portENTER_CRITICAL(&mux);
+
+        // Read 24 bits (MSB first)
         uint32_t data = 0;
         for (int i = 0; i < 24; i++) {
             digitalWrite(sck_pin_, HIGH);
@@ -68,13 +113,15 @@ public:
             delayMicroseconds(1);
         }
 
-        // Send gain pulse (1 pulse = channel A gain 128)
-        // This also triggers next conversion (~100ms @ 10Hz rate)
+        // Set gain for next conversion (1 pulse = channel A, gain 128)
+        // This also triggers the next conversion (~100ms @ 10Hz rate)
         digitalWrite(sck_pin_, HIGH);
         delayMicroseconds(1);
         digitalWrite(sck_pin_, LOW);
 
-        // Convert to signed 24-bit
+        portEXIT_CRITICAL(&mux);
+
+        // Convert 24-bit two's complement to 32-bit signed
         if (data & 0x800000) {
             data |= 0xFF000000;
         }
@@ -85,6 +132,14 @@ public:
     }
 
     uint32_t getLastValue() const { return last_value_; }
+
+    // Get tared value (raw - offset)
+    int32_t getTaredValue() const {
+        return (int32_t)last_value_ - offset_;
+    }
+
+    // Get the tare offset
+    int32_t getOffset() const { return offset_; }
 };
 
 // ======================== AHT10 TEMP/HUMIDITY SENSOR ========================
@@ -326,10 +381,11 @@ public:
 
 // ======================== SENSOR CACHE (Thread-safe) ========================
 
-// Global cache for complex sensor values - updated by background polling task,
-// read by DAQ task. This allows DAQ task to read instantly without I2C/SPI waits.
+// Global cache for complex sensor values:
+// - HX711: Read directly in DAQ task (fast ~50µs), cached for consistency
+// - I2C/SPI sensors: Polled in background task, cached to avoid DAQ task blocking
 struct SensorCache {
-    // HX711 Load Cell
+    // HX711 Load Cell (tared value)
     uint32_t hx711_value;
 
     // AHT10 Temperature + Humidity
@@ -360,10 +416,10 @@ private:
     // Global sensor initialization flags (checked once at init, not in hot path)
     static bool sensors_initialized_;
 
-    // Global sensor cache (updated by polling task, read by DAQ task)
+    // Global sensor cache
     static SensorCache sensor_cache_;
 
-    // Conversion pending flags for background polling task
+    // Conversion pending flags for I2C/SPI sensors (background polling task)
     static bool aht10_pending_;
     static bool bmp280_pending_;
 
@@ -449,19 +505,12 @@ public:
 
     // Background sensor polling function (called by sensorPollingTask)
     // This handles all I2C/SPI communication and timeouts off the critical path
+    // NOTE: HX711 is NOT polled here - it's fast enough to read directly in DAQ task
     static void pollSensors(const ChannelConfig* channels, uint8_t num_channels) {
         for (uint8_t i = 0; i < num_channels; i++) {
             if (!channels[i].enabled) continue;
 
             switch (channels[i].acquisition_method) {
-                case ACQ_HX711: {
-                    uint32_t value;
-                    if (hx711_.read(value)) {
-                        sensor_cache_.hx711_value = value;
-                    }
-                    break;
-                }
-
                 case ACQ_I2C_ADC: {
                     if (channels[i].sensor_type == 10) { // SENSOR_AHT10
                         if (!aht10_pending_) {
@@ -509,11 +558,18 @@ public:
     }
 
 private:
-    // Ultra-fast sensor read - just returns cached value (zero overhead)
+    // Read complex sensors (HX711 is fast non-blocking, I2C/SPI use cache)
     static uint32_t readComplexSensor(const ChannelConfig& ch) {
         switch (ch.acquisition_method) {
-            case ACQ_HX711:
-                return sensor_cache_.hx711_value;
+            case ACQ_HX711: {
+                // HX711 is fast (~50µs when ready), read directly
+                uint32_t raw_value;
+                if (hx711_.read(raw_value)) {
+                    // Store tared value (raw - offset) in cache
+                    sensor_cache_.hx711_value = (uint32_t)hx711_.getTaredValue();
+                }
+                return sensor_cache_.hx711_value; // Return tared value
+            }
 
             case ACQ_I2C_ADC:
                 if (ch.sensor_type == 10) { // SENSOR_AHT10
@@ -539,6 +595,7 @@ private:
 };
 
 // Static member initialization
+portMUX_TYPE HX711Reader::mux = portMUX_INITIALIZER_UNLOCKED;
 HX711Reader Acquisition::hx711_;
 AHT10Reader Acquisition::aht10_;
 BMP280Reader Acquisition::bmp280_;

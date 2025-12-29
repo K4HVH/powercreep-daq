@@ -418,7 +418,6 @@ int main(int argc, char* argv[]) {
                                         if (it != channelDataTypes.end()) {
                                             uint8_t valueSize = getValueSize(it->second);
 
-                                            // Skip the value bytes (we don't need to parse the actual value for throughput test)
                                             if (offset + valueSize <= frame.payload.size()) {
                                                 channelSamples[chId]++;
                                                 offset += valueSize;
