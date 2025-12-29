@@ -198,13 +198,22 @@ public:
         uint8_t status = Wire.read();
         if (status & 0x80) return false; // Busy bit set
 
-        uint32_t raw_humidity = ((uint32_t)Wire.read() << 12) |
-                                ((uint32_t)Wire.read() << 4) |
-                                ((uint32_t)Wire.read() >> 4);
+        // Read the 5 data bytes (humidity and temp share byte 3)
+        uint8_t byte1 = Wire.read();  // Humidity[19:12]
+        uint8_t byte2 = Wire.read();  // Humidity[11:4]
+        uint8_t byte3 = Wire.read();  // Humidity[3:0] (upper nibble) | Temp[19:16] (lower nibble)
+        uint8_t byte4 = Wire.read();  // Temp[15:8]
+        uint8_t byte5 = Wire.read();  // Temp[7:0]
 
-        uint32_t raw_temp = (((uint32_t)Wire.read() & 0x0F) << 16) |
-                            ((uint32_t)Wire.read() << 8) |
-                            Wire.read();
+        // Parse 20-bit humidity (upper 2.5 bytes)
+        uint32_t raw_humidity = ((uint32_t)byte1 << 12) |
+                                ((uint32_t)byte2 << 4) |
+                                ((uint32_t)byte3 >> 4);
+
+        // Parse 20-bit temperature (lower 2.5 bytes, shares byte3)
+        uint32_t raw_temp = (((uint32_t)byte3 & 0x0F) << 16) |
+                            ((uint32_t)byte4 << 8) |
+                            (uint32_t)byte5;
 
         // Convert to physical units
         humidity_percent = ((float)raw_humidity / 1048576.0f) * 100.0f;
