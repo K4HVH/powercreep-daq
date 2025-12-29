@@ -21,12 +21,12 @@ public:
         // Number of channels
         frame.addByte(NUM_CHANNELS);
 
-        // Channel metadata
+        // Channel metadata (v3 format)
         for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
             frame.addByte(channels[i].channel_id);
 
-            // Flags
-            uint8_t flags = channels[i].is_analog ? CHANNEL_FLAG_ANALOG : 0;
+            // FLAGS (v3): bits 0-2 = ACQUISITION_METHOD, bits 3-5 = DATA_TYPE, bits 6-7 = reserved (0)
+            uint8_t flags = makeChannelFlags(channels[i].acquisition_method, channels[i].data_type);
             frame.addByte(flags);
 
             // Default sample rate
@@ -59,10 +59,16 @@ public:
         last_heartbeat_ms_ = millis();
     }
 
-    // Check if heartbeat needs to be sent (every 1 second)
-    void process() {
+    // v3: MUST send HEARTBEAT only if no DATA_BATCH sent in last T_HEARTBEAT seconds
+    // Recommended T_HEARTBEAT = 1 second
+    void process(unsigned long last_data_batch_ms) {
         unsigned long now = millis();
-        if (now - last_heartbeat_ms_ >= 1000) {
+
+        // Only send heartbeat if:
+        // 1. At least 1 second since last heartbeat attempt, AND
+        // 2. No DATA_BATCH sent in the last 1 second
+        if ((now - last_heartbeat_ms_ >= 1000) &&
+            (now - last_data_batch_ms >= 1000)) {
             sendHeartbeat();
             last_heartbeat_ms_ = now;
         }

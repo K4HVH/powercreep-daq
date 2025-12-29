@@ -4,7 +4,8 @@
 #include "protocol.h"
 
 // Maximum frame size (sync + len + type + payload + crc)
-constexpr size_t MAX_FRAME_SIZE = 512;
+// v3 supports payloads up to 65535 bytes, but we use 2KB for practical DATA_BATCH frames
+constexpr size_t MAX_FRAME_SIZE = 2048;
 
 class FrameBuilder {
 public:
@@ -35,6 +36,22 @@ public:
     void addUint32(uint32_t value) {
         if (payload_len_ + 4 <= MAX_PAYLOAD_SIZE) {
             writeUint32LE(&payload_[payload_len_], value);
+            payload_len_ += 4;
+        }
+    }
+
+    // Add int24_t (24-bit signed, little-endian) to payload (v3)
+    void addInt24(int32_t value) {
+        if (payload_len_ + 3 <= MAX_PAYLOAD_SIZE) {
+            writeInt24LE(&payload_[payload_len_], value);
+            payload_len_ += 3;
+        }
+    }
+
+    // Add float32 (IEEE 754 single-precision, little-endian) to payload (v3)
+    void addFloat32(float value) {
+        if (payload_len_ + 4 <= MAX_PAYLOAD_SIZE) {
+            writeFloat32LE(&payload_[payload_len_], value);
             payload_len_ += 4;
         }
     }
@@ -92,9 +109,16 @@ public:
         memcpy(&frame_buffer[frame_idx], payload_, payload_len_);
         frame_idx += payload_len_;
 
-        // Calculate CRC over [LEN_LOW][LEN_HIGH][TYPE][PAYLOAD]
+        // Calculate CRC over [LEN_LOW][LEN_HIGH][TYPE][PAYLOAD_WINDOW]
+        // PAYLOAD_WINDOW = first 1024 bytes of payload (or entire payload if ≤ 1024)
         // CRC starts at offset 2 (after sync bytes)
-        uint16_t crc = crc16_ccitt(&frame_buffer[2], 3 + payload_len_);
+        size_t crc_input_len;
+        if (payload_len_ <= 1024) {
+            crc_input_len = 3 + payload_len_;  // LENGTH(2) + TYPE(1) + entire payload
+        } else {
+            crc_input_len = 3 + 1024;  // LENGTH(2) + TYPE(1) + first 1024 bytes of payload
+        }
+        uint16_t crc = crc16_ccitt(&frame_buffer[2], crc_input_len);
 
         // CRC (2-byte little-endian)
         frame_buffer[frame_idx++] = (uint8_t)(crc & 0xFF);

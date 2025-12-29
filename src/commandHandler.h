@@ -26,7 +26,7 @@ public:
         frame.send();
     }
 
-    // Handle GPIO command
+    // Handle GPIO command (v3: check for peripheral-reserved)
     static void handleGPIO(const uint8_t* payload, uint8_t len) {
         if (len < 2) {
             sendACK(CMD_GPIO, ACK_INVALID_PARAM, "Invalid payload");
@@ -36,13 +36,27 @@ public:
         uint8_t pin = payload[0];
         uint8_t state = payload[1];
 
-        // Validate pin
+        // Validate pin and check for peripheral-reserved (v3)
         bool pin_valid = false;
+        bool is_peripheral_reserved = false;
         for (uint8_t i = 0; i < NUM_OUTPUTS; i++) {
-            if (outputs[i].pin_number == pin && (outputs[i].capabilities & OUTPUT_CAP_GPIO)) {
-                pin_valid = true;
-                break;
+            if (outputs[i].pin_number == pin) {
+                if (outputs[i].capabilities & OUTPUT_CAP_PERIPHERAL) {
+                    is_peripheral_reserved = true;
+                    break;
+                }
+                if (outputs[i].capabilities & OUTPUT_CAP_GPIO) {
+                    pin_valid = true;
+                    break;
+                }
             }
+        }
+
+        if (is_peripheral_reserved) {
+            char error_msg[64];
+            snprintf(error_msg, sizeof(error_msg), "Pin %d is peripheral-reserved", pin);
+            sendACK(CMD_GPIO, ACK_UNSUPPORTED, error_msg);
+            return;
         }
 
         if (!pin_valid) {
@@ -58,7 +72,7 @@ public:
         sendACK(CMD_GPIO, ACK_SUCCESS);
     }
 
-    // Handle PWM command
+    // Handle PWM command (v3: check for peripheral-reserved)
     static void handlePWM(const uint8_t* payload, uint8_t len) {
         if (len < 4) {
             sendACK(CMD_PWM, ACK_INVALID_PARAM, "Invalid payload");
@@ -69,13 +83,25 @@ public:
         uint16_t frequency_hz = readUint16LE(&payload[1]);
         uint8_t duty_percent = payload[3];
 
-        // Validate pin
+        // Validate pin and check for peripheral-reserved (v3)
         bool pin_valid = false;
+        bool is_peripheral_reserved = false;
         for (uint8_t i = 0; i < NUM_OUTPUTS; i++) {
-            if (outputs[i].pin_number == pin && (outputs[i].capabilities & OUTPUT_CAP_PWM)) {
-                pin_valid = true;
-                break;
+            if (outputs[i].pin_number == pin) {
+                if (outputs[i].capabilities & OUTPUT_CAP_PERIPHERAL) {
+                    is_peripheral_reserved = true;
+                    break;
+                }
+                if (outputs[i].capabilities & OUTPUT_CAP_PWM) {
+                    pin_valid = true;
+                    break;
+                }
             }
+        }
+
+        if (is_peripheral_reserved) {
+            sendACK(CMD_PWM, ACK_UNSUPPORTED, "Pin is peripheral-reserved");
+            return;
         }
 
         if (!pin_valid) {
@@ -103,19 +129,39 @@ public:
         sendACK(CMD_PWM, ACK_SUCCESS);
     }
 
-    // Handle DAC command
+    // Handle DAC command (v3: uses pin number, not channel; checks peripheral-reserved)
     static void handleDAC(const uint8_t* payload, uint8_t len) {
         if (len < 3) {
             sendACK(CMD_DAC, ACK_INVALID_PARAM, "Invalid payload");
             return;
         }
 
-        uint8_t channel = payload[0];
+        uint8_t pin = payload[0];
         uint16_t value_12bit = readUint16LE(&payload[1]);
 
-        // ESP32 has 2 DAC channels: DAC1 (GPIO25), DAC2 (GPIO26)
-        if (channel > 1) {
-            sendACK(CMD_DAC, ACK_INVALID_PARAM, "Invalid DAC channel (0-1)");
+        // Validate pin and check for peripheral-reserved (v3)
+        bool pin_valid = false;
+        bool is_peripheral_reserved = false;
+        for (uint8_t i = 0; i < NUM_OUTPUTS; i++) {
+            if (outputs[i].pin_number == pin) {
+                if (outputs[i].capabilities & OUTPUT_CAP_PERIPHERAL) {
+                    is_peripheral_reserved = true;
+                    break;
+                }
+                if (outputs[i].capabilities & OUTPUT_CAP_DAC) {
+                    pin_valid = true;
+                    break;
+                }
+            }
+        }
+
+        if (is_peripheral_reserved) {
+            sendACK(CMD_DAC, ACK_UNSUPPORTED, "Pin is peripheral-reserved");
+            return;
+        }
+
+        if (!pin_valid) {
+            sendACK(CMD_DAC, ACK_INVALID_PARAM, "Invalid pin or no DAC capability");
             return;
         }
 
@@ -127,14 +173,13 @@ public:
         // ESP32 DAC is 8-bit (0-255), scale down from 12-bit
         uint8_t dac_value = value_12bit >> 4;  // Divide by 16
 
-        // Write to DAC
-        if (channel == 0) {
-            dacWrite(25, dac_value);  // DAC1 on GPIO25
+        // ESP32 has 2 DAC pins: GPIO25 (DAC1), GPIO26 (DAC2)
+        if (pin == 25 || pin == 26) {
+            dacWrite(pin, dac_value);
+            sendACK(CMD_DAC, ACK_SUCCESS);
         } else {
-            dacWrite(26, dac_value);  // DAC2 on GPIO26
+            sendACK(CMD_DAC, ACK_INVALID_PARAM, "Pin does not support DAC");
         }
-
-        sendACK(CMD_DAC, ACK_SUCCESS);
     }
 
     // Handle CONFIG command

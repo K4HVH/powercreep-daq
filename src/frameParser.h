@@ -96,7 +96,8 @@ private:
         READ_CRC
     };
 
-    static constexpr size_t MAX_PAYLOAD_SIZE = 512;
+    // v3 supports payloads up to 65535 bytes, but we use 2KB for practical limits
+    static constexpr size_t MAX_PAYLOAD_SIZE = 2048;
 
     State state_;
     uint8_t len_low_;
@@ -111,15 +112,19 @@ private:
     FrameCallback callback_;
 
     void validateAndDispatch() {
-        // Calculate CRC on [LEN_LOW][LEN_HIGH][TYPE][PAYLOAD]
-        uint8_t crc_data[MAX_PAYLOAD_SIZE + 3];
+        // Calculate CRC on [LEN_LOW][LEN_HIGH][TYPE][PAYLOAD_WINDOW]
+        // PAYLOAD_WINDOW = first 1024 bytes of payload (or entire payload if ≤ 1024)
+        uint8_t crc_data[1027];  // Max: LENGTH(2) + TYPE(1) + PAYLOAD_WINDOW(1024)
         crc_data[0] = len_low_;
         crc_data[1] = len_high_;
         crc_data[2] = type_;
-        memcpy(&crc_data[3], payload_, payload_len_);
 
-        // CRC size = 3 (LEN_LOW + LEN_HIGH + TYPE) + payload_len
-        uint16_t calculated_crc = crc16_ccitt(crc_data, 3 + payload_len_);
+        // Copy payload window (up to 1024 bytes)
+        size_t payload_window = (payload_len_ <= 1024) ? payload_len_ : 1024;
+        memcpy(&crc_data[3], payload_, payload_window);
+
+        // CRC input size = 3 + payload_window
+        uint16_t calculated_crc = crc16_ccitt(crc_data, 3 + payload_window);
         uint16_t received_crc = readUint16LE(crc_bytes_);
 
         if (calculated_crc == received_crc) {

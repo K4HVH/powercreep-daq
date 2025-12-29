@@ -7,14 +7,48 @@
 #include <cstdint>
 #include <map>
 
-// --- Protocol Constants ---
+// --- Protocol v3 Constants ---
 constexpr uint8_t SYNC1 = 0xAA;
 constexpr uint8_t SYNC2 = 0x55;
-constexpr uint8_t PROTOCOL_VERSION = 2;
+constexpr uint8_t PROTOCOL_VERSION = 3;
 
 constexpr uint8_t HANDSHAKE_REQ  = 0x01;
 constexpr uint8_t HANDSHAKE_RESP = 0x02;
 constexpr uint8_t DATA_BATCH     = 0x10;
+
+constexpr size_t CRC_WINDOW_SIZE = 1024;  // v3: CRC windowing
+
+// v3: DATA_TYPE enumeration (bits 3-5 of FLAGS)
+enum DataType : uint8_t {
+    DATA_UINT8  = 0b000,
+    DATA_INT8   = 0b001,
+    DATA_UINT16 = 0b010,
+    DATA_INT16  = 0b011,
+    DATA_INT24  = 0b100,
+    DATA_UINT32 = 0b101,
+    DATA_INT32  = 0b110,
+    DATA_FLOAT32= 0b111
+};
+
+// Value size lookup table (indexed by DATA_TYPE)
+constexpr uint8_t VALUE_SIZE_TABLE[8] = {
+    1,  // DATA_UINT8
+    1,  // DATA_INT8
+    2,  // DATA_UINT16
+    2,  // DATA_INT16
+    3,  // DATA_INT24
+    4,  // DATA_UINT32
+    4,  // DATA_INT32
+    4   // DATA_FLOAT32
+};
+
+inline uint8_t getValueSize(DataType data_type) {
+    return VALUE_SIZE_TABLE[(uint8_t)data_type & 0x07];
+}
+
+inline DataType getDataType(uint8_t flags) {
+    return (DataType)((flags >> 3) & 0x07);
+}
 
 // --- CRC16-CCITT Implementation ---
 // Polynomial: 0x1021, Initial: 0xFFFF
@@ -53,9 +87,11 @@ static const uint16_t crc16_table[256] = {
     0x6E17, 0x7E36, 0x4E55, 0x5E74, 0x2E93, 0x3EB2, 0x0ED1, 0x1EF0
 };
 
+// v3: CRC with windowing (only first 1024 bytes if payload > 1024)
 inline uint16_t crc16_ccitt(const uint8_t* data, size_t len) {
     uint16_t crc = 0xFFFF;
-    for (size_t i = 0; i < len; i++) {
+    size_t crc_len = (len <= CRC_WINDOW_SIZE) ? len : CRC_WINDOW_SIZE;
+    for (size_t i = 0; i < crc_len; i++) {
         uint8_t index = (crc >> 8) ^ data[i];
         crc = (crc << 8) ^ crc16_table[index];
     }
@@ -173,7 +209,8 @@ public:
             case READ_LEN_HIGH:
                 len_high = byte;
                 payload_len = (uint16_t)len_low | ((uint16_t)len_high << 8);
-                if (payload_len > 1024) { // Sanity check
+                // v3: Support payloads up to 65535 bytes
+                if (payload_len > 2048) { // Practical limit for this test
                     state = WAIT_SYNC1;
                 } else {
                     state = READ_TYPE;
@@ -252,18 +289,20 @@ int main(int argc, char* argv[]) {
         SerialPort serial(portName, baudRate);
         Parser parser;
 
-        // 1. Send Handshake Request
-        std::cout << "Sending Handshake Request..." << std::endl;
+        // 1. Send Handshake Request (v3 format)
+        std::cout << "Sending Handshake Request (v3)..." << std::endl;
         std::vector<uint8_t> req;
         req.push_back(SYNC1);
         req.push_back(SYNC2);
-        req.push_back(0x00); // Len Low
+        req.push_back(0x02); // Len Low (2 bytes payload)
         req.push_back(0x00); // Len High
         req.push_back(HANDSHAKE_REQ); // Type
-        
-        // CRC over Len(2) + Type(1) + Payload(0)
-        uint8_t crc_header[] = {0x00, 0x00, HANDSHAKE_REQ};
-        uint16_t crc = crc16_ccitt(crc_header, 3);
+        req.push_back(0x03); // MAX_VERSION = 3
+        req.push_back(0x03); // MIN_VERSION = 3
+
+        // CRC over Len(2) + Type(1) + Payload(2)
+        uint8_t crc_data[] = {0x02, 0x00, HANDSHAKE_REQ, 0x03, 0x03};
+        uint16_t crc = crc16_ccitt(crc_data, 5);
         req.push_back(crc & 0xFF);
         req.push_back((crc >> 8) & 0xFF);
 
@@ -273,7 +312,8 @@ int main(int argc, char* argv[]) {
         std::cout << "Waiting for Handshake Response..." << std::endl;
         bool handshakeReceived = false;
         uint8_t buffer[1024];
-        
+        std::map<uint8_t, DataType> channelDataTypes; // Map channel_id -> DATA_TYPE
+
         auto startWait = std::chrono::steady_clock::now();
         while (!handshakeReceived) {
             if (std::chrono::steady_clock::now() - startWait > std::chrono::seconds(5)) {
@@ -288,7 +328,50 @@ int main(int argc, char* argv[]) {
                     if (parser.feed(buffer[i], frame)) {
                         if (frame.type == HANDSHAKE_RESP) {
                             std::cout << "Handshake Received!" << std::endl;
-                            std::cout << "Protocol Version: " << (int)frame.payload[0] << std::endl;
+
+                            // Parse HANDSHAKE_RESP payload:
+                            // [VERSION(1)][DEVICE_ID(4)][NUM_CHANNELS(1)][CHANNELS...][NUM_OUTPUTS(1)][OUTPUTS...]
+                            if (frame.payload.size() >= 6) {
+                                uint8_t version = frame.payload[0];
+                                uint32_t deviceId = frame.payload[1] | (frame.payload[2] << 8) |
+                                                   (frame.payload[3] << 16) | (frame.payload[4] << 24);
+                                uint8_t numChannels = frame.payload[5];
+
+                                std::cout << "Protocol Version: " << (int)version << std::endl;
+                                std::cout << "Device ID: 0x" << std::hex << deviceId << std::dec << std::endl;
+                                std::cout << "Number of Channels: " << (int)numChannels << std::endl;
+
+                                // Parse channel configurations
+                                // Format: [CHANNEL_ID(1)][FLAGS(1)][SAMPLE_RATE(2)][NAME_LEN(1)][NAME(n)][UNIT_LEN(1)][UNIT(n)]
+                                size_t offset = 6;
+                                for (int ch = 0; ch < numChannels; ch++) {
+                                    if (offset + 5 <= frame.payload.size()) {
+                                        uint8_t channelId = frame.payload[offset];
+                                        uint8_t flags = frame.payload[offset + 1];
+                                        uint16_t sampleRateHz = frame.payload[offset + 2] | (frame.payload[offset + 3] << 8);
+                                        uint8_t nameLen = frame.payload[offset + 4];
+
+                                        // Skip NAME string
+                                        offset += 5 + nameLen;
+
+                                        if (offset >= frame.payload.size()) break;
+
+                                        uint8_t unitLen = frame.payload[offset];
+
+                                        // Extract DATA_TYPE from FLAGS (bits 3-5)
+                                        DataType dataType = getDataType(flags);
+                                        channelDataTypes[channelId] = dataType;
+
+                                        // Skip UNIT_LEN + UNIT string for next channel
+                                        offset += 1 + unitLen;
+
+                                        std::cout << "  CH" << (int)channelId << ": " << sampleRateHz
+                                                  << "Hz, DataType=" << (int)dataType
+                                                  << " (" << (int)getValueSize(dataType) << " bytes)" << std::endl;
+                                    }
+                                }
+                            }
+
                             handshakeReceived = true;
                             break;
                         }
@@ -318,18 +401,35 @@ int main(int argc, char* argv[]) {
                             totalBytes += frame.payload.size();
                             totalFrames++;
 
-                            // Parse DATA_BATCH payload
-                            // [SeqNum(4)][Count(1)][Sample1(3)]...[SampleN(3)]
+                            // Parse DATA_BATCH payload (v3 variable-length)
+                            // [SeqNum(4)][Count(1)][Sample1][Sample2]...[SampleN]
+                            // Each sample: [ChannelID(1)][Value(1-4 bytes based on DATA_TYPE)]
                             if (frame.payload.size() >= 5) {
                                 uint8_t sampleCount = frame.payload[4];
                                 size_t offset = 5;
-                                
+
                                 for (int s = 0; s < sampleCount; s++) {
-                                    if (offset + 3 <= frame.payload.size()) {
+                                    if (offset < frame.payload.size()) {
                                         uint8_t chId = frame.payload[offset];
-                                        // uint16_t val = frame.payload[offset+1] | (frame.payload[offset+2] << 8);
-                                        channelSamples[chId]++;
-                                        offset += 3;
+                                        offset++; // Move past channel ID
+
+                                        // Look up DATA_TYPE for this channel
+                                        auto it = channelDataTypes.find(chId);
+                                        if (it != channelDataTypes.end()) {
+                                            uint8_t valueSize = getValueSize(it->second);
+
+                                            // Skip the value bytes (we don't need to parse the actual value for throughput test)
+                                            if (offset + valueSize <= frame.payload.size()) {
+                                                channelSamples[chId]++;
+                                                offset += valueSize;
+                                            } else {
+                                                std::cerr << "Warning: Incomplete sample for CH" << (int)chId << std::endl;
+                                                break;
+                                            }
+                                        } else {
+                                            std::cerr << "Warning: Unknown channel ID " << (int)chId << std::endl;
+                                            break; // Unknown channel, can't determine value size
+                                        }
                                     }
                                 }
                             }

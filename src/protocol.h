@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 // Protocol Version
-constexpr uint8_t PROTOCOL_VERSION = 2;  // Version 2: 2-byte length field
+constexpr uint8_t PROTOCOL_VERSION = 3;  // Version 3: Variable-length samples with DATA_TYPE support
 
 // Sync bytes for frame start
 constexpr uint8_t SYNC1 = 0xAA;
@@ -43,13 +43,69 @@ constexpr uint8_t ACK_HARDWARE_ERROR = 0x02;
 constexpr uint8_t ACK_UNSUPPORTED    = 0x03;
 constexpr uint8_t ACK_UNKNOWN_ERROR  = 0xFF;
 
-// Channel flags (bit field)
-constexpr uint8_t CHANNEL_FLAG_ANALOG = 0x01;
+// ======================== PROTOCOL V3 DEFINITIONS ========================
+
+// ACQUISITION_METHOD enumeration (bits 0-2 of FLAGS)
+enum AcquisitionMethod : uint8_t {
+    ACQ_GPIO      = 0b000,  // Digital GPIO input
+    ACQ_ADC       = 0b001,  // Internal ADC
+    ACQ_HX711     = 0b010,  // HX711 load cell ADC
+    ACQ_SPI_ADC   = 0b011,  // External SPI ADC
+    ACQ_I2C_ADC   = 0b100,  // External I2C ADC/sensor
+    ACQ_UART      = 0b101,  // UART/Serial sensor
+    ACQ_RESERVED6 = 0b110,  // Reserved
+    ACQ_RESERVED7 = 0b111   // Reserved
+};
+
+// DATA_TYPE enumeration (bits 3-5 of FLAGS)
+enum DataType : uint8_t {
+    DATA_UINT8  = 0b000,  // 8-bit unsigned (1 byte, 0-255)
+    DATA_INT8   = 0b001,  // 8-bit signed (1 byte, -128 to 127)
+    DATA_UINT16 = 0b010,  // 16-bit unsigned (2 bytes, 0-65535)
+    DATA_INT16  = 0b011,  // 16-bit signed (2 bytes, -32768 to 32767)
+    DATA_INT24  = 0b100,  // 24-bit signed (3 bytes, -8388608 to 8388607)
+    DATA_UINT32 = 0b101,  // 32-bit unsigned (4 bytes, 0-4294967295)
+    DATA_INT32  = 0b110,  // 32-bit signed (4 bytes, -2147483648 to 2147483647)
+    DATA_FLOAT32= 0b111   // 32-bit IEEE 754 float (4 bytes)
+};
+
+// FLAGS bitfield structure (bits 0-2: ACQ_METHOD, bits 3-5: DATA_TYPE, bits 6-7: reserved)
+inline uint8_t makeChannelFlags(AcquisitionMethod acq, DataType data_type) {
+    return ((uint8_t)acq & 0x07) | (((uint8_t)data_type & 0x07) << 3);
+}
+
+inline AcquisitionMethod getAcquisitionMethod(uint8_t flags) {
+    return (AcquisitionMethod)(flags & 0x07);
+}
+
+inline DataType getDataType(uint8_t flags) {
+    return (DataType)((flags >> 3) & 0x07);
+}
+
+// Value size lookup table (indexed by DATA_TYPE)
+constexpr uint8_t VALUE_SIZE_TABLE[8] = {
+    1,  // DATA_UINT8
+    1,  // DATA_INT8
+    2,  // DATA_UINT16
+    2,  // DATA_INT16
+    3,  // DATA_INT24
+    4,  // DATA_UINT32
+    4,  // DATA_INT32
+    4   // DATA_FLOAT32
+};
+
+inline uint8_t getValueSize(DataType data_type) {
+    return VALUE_SIZE_TABLE[(uint8_t)data_type & 0x07];
+}
 
 // Output capabilities (bit field)
-constexpr uint8_t OUTPUT_CAP_GPIO = 0x01;
-constexpr uint8_t OUTPUT_CAP_PWM  = 0x02;
-constexpr uint8_t OUTPUT_CAP_DAC  = 0x04;
+constexpr uint8_t OUTPUT_CAP_GPIO      = 0x01;  // Bit 0: GPIO capability
+constexpr uint8_t OUTPUT_CAP_PWM       = 0x02;  // Bit 1: PWM capability
+constexpr uint8_t OUTPUT_CAP_DAC       = 0x04;  // Bit 2: DAC capability
+constexpr uint8_t OUTPUT_CAP_PERIPHERAL= 0x08;  // Bit 3: Peripheral-reserved (firmware-controlled)
+
+// CRC Windowing (v3 optimization)
+constexpr size_t CRC_WINDOW_SIZE = 1024;  // Maximum payload bytes included in CRC calculation
 
 // CRC-16-CCITT lookup table (optimized for speed, placed in DRAM for IRAM access)
 // Polynomial: 0x1021, pre-computed for all 256 byte values
@@ -88,12 +144,16 @@ static const uint16_t DRAM_ATTR crc16_table[256] = {
     0x6E17, 0x7E36, 0x4E55, 0x5E74, 0x2E93, 0x3EB2, 0x0ED1, 0x1EF0
 };
 
-// CRC-16-CCITT algorithm (optimized with lookup table, ~8x faster)
+// CRC-16-CCITT algorithm with windowing (v3 optimization)
 // Polynomial: 0x1021, Initial: 0xFFFF
+// If len > CRC_WINDOW_SIZE, only first CRC_WINDOW_SIZE bytes are included in CRC
 inline uint16_t crc16_ccitt(const uint8_t* data, size_t len) {
     uint16_t crc = 0xFFFF;
 
-    for (size_t i = 0; i < len; i++) {
+    // Apply CRC window: if len > 1024, only use first 1024 bytes
+    size_t crc_len = (len <= CRC_WINDOW_SIZE) ? len : CRC_WINDOW_SIZE;
+
+    for (size_t i = 0; i < crc_len; i++) {
         uint8_t index = (crc >> 8) ^ data[i];
         crc = (crc << 8) ^ crc16_table[index];
     }
@@ -113,6 +173,19 @@ inline void writeUint32LE(uint8_t* dest, uint32_t value) {
     dest[1] = (value >> 8) & 0xFF;
     dest[2] = (value >> 16) & 0xFF;
     dest[3] = (value >> 24) & 0xFF;
+}
+
+// Helper to write int24_t in little-endian (3 bytes, signed)
+inline void writeInt24LE(uint8_t* dest, int32_t value) {
+    dest[0] = value & 0xFF;
+    dest[1] = (value >> 8) & 0xFF;
+    dest[2] = (value >> 16) & 0xFF;
+}
+
+// Helper to write float32 in little-endian (4 bytes, IEEE 754)
+inline void writeFloat32LE(uint8_t* dest, float value) {
+    uint32_t* value_ptr = (uint32_t*)&value;
+    writeUint32LE(dest, *value_ptr);
 }
 
 // Helper to read uint16_t in little-endian

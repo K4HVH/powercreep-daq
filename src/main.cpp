@@ -5,6 +5,7 @@
 #include "deviceConfig.h"
 #include "commandHandler.h"
 #include "handshake.h"
+#include "acquisition.h"
 
 // ======================== DUAL-CORE ARCHITECTURE ========================
 // Core 0 (PRO_CPU):  Communication - Serial RX/TX, frame parsing, commands
@@ -15,19 +16,8 @@
 TaskHandle_t commTaskHandle = NULL;
 TaskHandle_t daqTaskHandle = NULL;
 
-// Queue for sending DATA_BATCH frames from DAQ to Comm task
-QueueHandle_t dataBatchQueue = NULL;
-constexpr size_t DATA_BATCH_QUEUE_SIZE = 10;
-
-// Structure for passing data batches between cores
-struct DataBatchMessage {
-    uint32_t sequence_number;
-    uint8_t num_samples;
-    struct {
-        uint8_t channel_id;
-        uint16_t value;
-    } samples[10];
-};
+// v3: No queue needed - DAQ task sends DATA_BATCH frames directly via Serial
+// This eliminates inter-core communication overhead
 
 // Heartbeat state
 Heartbeat heartbeat;
@@ -38,25 +28,21 @@ FrameParser parser;
 // Handshake completion flag (prevents data transmission until handshake done)
 volatile bool g_handshake_complete = false;
 
-// ======================== DATA ACQUISITION TASK (Core 1) ========================
-constexpr size_t SAMPLES_PER_BATCH = 10;
+// Sequence number for DATA_BATCH frames (MUST reset to 0 after each HANDSHAKE_RESP)
+volatile uint32_t g_sequence_number = 0;
 
-// Pre-computed list of enabled channel indices (optimization)
+// Track last DATA_BATCH send time for heartbeat logic (v3 requirement)
+volatile unsigned long g_last_data_batch_ms = 0;
+
+// ======================== DATA ACQUISITION TASK (Core 1) ========================
+
+// v3: Pre-computed list of enabled channel indices (O(1) lookup optimization)
 uint8_t enabled_channels[NUM_CHANNELS];
 uint8_t num_enabled_channels = 0;
 
-struct DaqState {
-    hw_timer_t* timer;
-    uint32_t sequence_number;
-    struct {
-        uint8_t channel_id;
-        uint16_t value;
-    } sample_buffer[SAMPLES_PER_BATCH];
-    size_t sample_index;
-    uint32_t sim_time;
-};
-
-volatile bool DRAM_ATTR g_daq_sample_flag = false;
+// v3: Batch sending parameters
+constexpr uint8_t MAX_SAMPLES_PER_BATCH = 50;  // Max samples per batch
+constexpr uint32_t BATCH_SEND_INTERVAL_MS = 10;  // Send batch every 10ms even if not full (100 batches/sec)
 
 void IRAM_ATTR daqTimerISR() {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
@@ -66,105 +52,121 @@ void IRAM_ATTR daqTimerISR() {
     }
 }
 
-uint16_t IRAM_ATTR generateSimulatedValue(uint8_t channel_idx, uint32_t sim_time) {
-    float time_sec = sim_time / 1000.0f;
-    float value_normalized = 0.5f;
-
-    switch (channel_idx) {
-        case 6:  // 1 Hz sine
-            value_normalized = 0.5f + 0.5f * sin(2.0f * PI * 1.0f * time_sec);
-            break;
-        case 7:  // 10 Hz sine
-            value_normalized = 0.5f + 0.5f * sin(2.0f * PI * 10.0f * time_sec);
-            break;
-        case 8:  // 5 Hz square
-            value_normalized = (sin(2.0f * PI * 5.0f * time_sec) > 0) ? 1.0f : 0.0f;
-            break;
-        case 9:  // 2 Hz ramp
-            value_normalized = fmod(time_sec * 2.0f, 1.0f);
-            break;
-        case 10:  // Noise
-            value_normalized = random(0, 4096) / 4095.0f;
-            break;
-    }
-
-    return (uint16_t)(value_normalized * 4095.0f);
-}
-
+// v3: Completely rewritten DAQ task with variable-length sample support
 void daqTask(void* parameter) {
-    DaqState state = {nullptr, 0, {}, 0, 0};
+    hw_timer_t* timer = nullptr;
+    uint32_t tick_count = 0;
+    unsigned long last_batch_send = 0;
+
+    // v3: Variable-length batch buffer (channel_id + value based on data_type)
+    uint8_t batch_buffer[256];  // Raw bytes for variable-length samples
+    size_t batch_bytes = 0;
+    uint8_t batch_count = 0;
 
     // Configure ADC
     analogReadResolution(12);
     initializeADC();  // Configure per-channel attenuation
 
-    // Pre-compute enabled channels list (optimization)
+    // Initialize acquisition subsystem
+    Acquisition::init();
+
+    // Pre-compute enabled channels list (O(n) optimization)
     for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
         if (channels[i].enabled) {
             enabled_channels[num_enabled_channels++] = i;
         }
     }
 
-    // Setup hardware timer for 1000 Hz
-    state.timer = timerBegin(0, 80, true);
-    timerAttachInterrupt(state.timer, &daqTimerISR, true);
-    timerAlarmWrite(state.timer, 1000, true);
-    timerAlarmEnable(state.timer);
+    // Setup hardware timer for 1000 Hz base rate
+    timer = timerBegin(0, 80, true);
+    timerAttachInterrupt(timer, &daqTimerISR, true);
+    timerAlarmWrite(timer, 1000, true);  // 1ms per tick (1000 Hz)
+    timerAlarmEnable(timer);
+
+    last_batch_send = millis();
 
     while (true) {
-        // Wait for timer notification
+        // Wait for timer notification (1000 Hz tick)
         if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY)) {
 
-            // Sample all enabled channels (using pre-computed list for speed)
+            // Sample all enabled channels
             for (uint8_t idx = 0; idx < num_enabled_channels; idx++) {
                 uint8_t i = enabled_channels[idx];
                 const ChannelConfig& ch = channels[i];
 
-                // Check if it's time to sample this channel
-                // Base rate is 1000Hz. 
-                // Interval = 1000 / sample_rate
-                // e.g. 500Hz -> 1000/500 = 2 -> sample every 2nd tick
+                // Decimation: check if it's time to sample this channel
+                // Base rate is 1000Hz, interval = 1000 / sample_rate
                 uint32_t interval = 1000 / ch.default_sample_rate_hz;
-                if (interval == 0) interval = 1; // Safety
-                
-                if (state.sim_time % interval != 0) {
-                    continue;
-                }
+                if (interval == 0) interval = 1;  // Safety
+                if (tick_count % interval != 0) continue;
 
-                uint16_t value;
-                if (ch.is_analog) {
-                    if (ch.gpio_pin == 255) {
-                        value = generateSimulatedValue(i, state.sim_time);
-                    } else {
-                        value = analogRead(ch.gpio_pin);
+                // Read value using unified acquisition interface
+                uint32_t raw_value = Acquisition::read(ch);
+
+                // Add sample to batch buffer (variable-length based on data_type)
+                uint8_t value_size = getValueSize(ch.data_type);
+
+                // Check if batch would overflow
+                if (batch_count >= MAX_SAMPLES_PER_BATCH || (batch_bytes + 1 + value_size) > sizeof(batch_buffer)) {
+                    // Send current batch before adding new sample
+                    if (g_handshake_complete && batch_count > 0) {
+                        FrameBuilder frame;
+                        frame.begin(DATA_BATCH);
+                        frame.addUint32(g_sequence_number++);
+                        frame.addByte(batch_count);
+                        frame.addBytes(batch_buffer, batch_bytes);
+                        frame.send();
+                        last_batch_send = millis();
+                        g_last_data_batch_ms = last_batch_send;  // Track for heartbeat logic
                     }
-                } else {
-                    value = digitalRead(ch.gpio_pin) ? 4095 : 0;
+                    batch_bytes = 0;
+                    batch_count = 0;
                 }
 
-                // Add to batch buffer
-                state.sample_buffer[state.sample_index].channel_id = ch.channel_id;
-                state.sample_buffer[state.sample_index].value = value;
-                state.sample_index++;
+                // Add channel ID
+                batch_buffer[batch_bytes++] = ch.channel_id;
 
-                // Send batch if full
-                if (state.sample_index >= SAMPLES_PER_BATCH) {
-                    // Only send data after handshake is complete
-                    if (g_handshake_complete) {
-                        DataBatchMessage msg;
-                        msg.sequence_number = state.sequence_number++;
-                        msg.num_samples = state.sample_index;
-                        memcpy(msg.samples, state.sample_buffer, sizeof(msg.samples));
-
-                        // Send to comm task (non-blocking)
-                        xQueueSend(dataBatchQueue, &msg, 0);
-                    }
-
-                    state.sample_index = 0;
+                // Add value (little-endian, variable-length based on data_type)
+                switch (value_size) {
+                    case 1:  // 8-bit
+                        batch_buffer[batch_bytes++] = (uint8_t)raw_value;
+                        break;
+                    case 2:  // 16-bit
+                        batch_buffer[batch_bytes++] = (uint8_t)(raw_value & 0xFF);
+                        batch_buffer[batch_bytes++] = (uint8_t)((raw_value >> 8) & 0xFF);
+                        break;
+                    case 3:  // 24-bit
+                        batch_buffer[batch_bytes++] = (uint8_t)(raw_value & 0xFF);
+                        batch_buffer[batch_bytes++] = (uint8_t)((raw_value >> 8) & 0xFF);
+                        batch_buffer[batch_bytes++] = (uint8_t)((raw_value >> 16) & 0xFF);
+                        break;
+                    case 4:  // 32-bit (or float)
+                        batch_buffer[batch_bytes++] = (uint8_t)(raw_value & 0xFF);
+                        batch_buffer[batch_bytes++] = (uint8_t)((raw_value >> 8) & 0xFF);
+                        batch_buffer[batch_bytes++] = (uint8_t)((raw_value >> 16) & 0xFF);
+                        batch_buffer[batch_bytes++] = (uint8_t)((raw_value >> 24) & 0xFF);
+                        break;
                 }
+                batch_count++;
             }
 
-            state.sim_time++;
+            // Periodic batch sending (even if not full) - CRITICAL for throughput
+            // Send batch every BATCH_SEND_INTERVAL_MS to ensure timely delivery
+            if (g_handshake_complete && batch_count > 0 &&
+                (millis() - last_batch_send) >= BATCH_SEND_INTERVAL_MS) {
+                FrameBuilder frame;
+                frame.begin(DATA_BATCH);
+                frame.addUint32(g_sequence_number++);
+                frame.addByte(batch_count);
+                frame.addBytes(batch_buffer, batch_bytes);
+                frame.send();
+                last_batch_send = millis();
+                g_last_data_batch_ms = last_batch_send;  // Track for heartbeat logic
+                batch_bytes = 0;
+                batch_count = 0;
+            }
+
+            tick_count++;
         }
     }
 }
@@ -174,8 +176,26 @@ void daqTask(void* parameter) {
 void onFrameReceived(uint8_t frame_type, const uint8_t* payload, uint8_t payload_len) {
     switch (frame_type) {
         case HANDSHAKE_REQ:
-            Handshake::sendHandshakeResponse();
-            g_handshake_complete = true;  // Enable data transmission
+            // MUST validate version compatibility (v3 spec requirement)
+            if (payload_len >= 2) {
+                uint8_t max_version = payload[0];
+                uint8_t min_version = payload[1];
+
+                // Check if our protocol version (3) is within requested range
+                if (PROTOCOL_VERSION >= min_version && PROTOCOL_VERSION <= max_version) {
+                    Handshake::sendHandshakeResponse();
+                    g_sequence_number = 0;  // MUST reset sequence to 0 after HANDSHAKE_RESP
+                    g_handshake_complete = true;  // Enable data transmission
+                } else {
+                    // Incompatible version - send ERROR frame
+                    CommandHandler::sendError(ERROR_INVALID_COMMAND, "Protocol version mismatch");
+                    g_handshake_complete = false;
+                }
+            } else {
+                // Invalid HANDSHAKE_REQ payload
+                CommandHandler::sendError(ERROR_INVALID_COMMAND, "Invalid handshake request");
+                g_handshake_complete = false;
+            }
             break;
 
         case HEARTBEAT_ACK:
@@ -204,6 +224,7 @@ void onFrameReceived(uint8_t frame_type, const uint8_t* payload, uint8_t payload
     }
 }
 
+// v3: Simplified comm task (DAQ task sends frames directly, no queue needed)
 void commTask(void* parameter) {
     parser.setCallback(onFrameReceived);
     heartbeat.begin();
@@ -211,40 +232,17 @@ void commTask(void* parameter) {
     unsigned long last_heartbeat = millis();
 
     while (true) {
-        bool busy = false;
-
         // Process incoming serial data
         parser.processSerial();
 
-        // Send heartbeats every 1 second
+        // Send heartbeats (only if no DATA_BATCH sent recently - v3 requirement)
         if (millis() - last_heartbeat >= 1000) {
-            heartbeat.process();
+            heartbeat.process(g_last_data_batch_ms);
             last_heartbeat = millis();
         }
 
-        // Check for outgoing data batches from DAQ task
-        DataBatchMessage msg;
-        // Process all available batches to maximize throughput
-        while (xQueueReceive(dataBatchQueue, &msg, 0) == pdTRUE) {
-            // Build and send DATA_BATCH frame
-            FrameBuilder frame;
-            frame.begin(DATA_BATCH);
-            frame.addUint32(msg.sequence_number);
-            frame.addByte(msg.num_samples);
-
-            for (uint8_t i = 0; i < msg.num_samples; i++) {
-                frame.addByte(msg.samples[i].channel_id);
-                frame.addUint16(msg.samples[i].value);
-            }
-
-            frame.send();
-            busy = true;
-        }
-
-        // Only delay if we didn't do any work to save power/CPU
-        if (!busy) {
-            vTaskDelay(pdMS_TO_TICKS(1));
-        }
+        // Yield to other tasks
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 // ======================== ARDUINO SETUP/LOOP ========================
@@ -258,12 +256,7 @@ void setup() {
     initializeDigitalInputs();
     initializeOutputs();
 
-    // Create queue for inter-core communication
-    dataBatchQueue = xQueueCreate(DATA_BATCH_QUEUE_SIZE, sizeof(DataBatchMessage));
-
-    if (dataBatchQueue == NULL) {
-        return;  // Fatal error - cannot continue
-    }
+    // v3: No queue needed - DAQ task sends frames directly
 
     // Create tasks pinned to specific cores
     xTaskCreatePinnedToCore(
