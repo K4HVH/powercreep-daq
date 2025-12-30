@@ -106,7 +106,7 @@ void daqTask(void* parameter) {
                 if (tick_count % interval != 0) continue;
 
                 // Read value using unified acquisition interface
-                uint32_t raw_value = Acquisition::read(ch);
+                uint32_t raw_value = Acquisition::read(ch, channels, NUM_CHANNELS);
 
                 // Add sample to batch buffer (variable-length based on data_type)
                 uint8_t value_size = getValueSize(ch.data_type);

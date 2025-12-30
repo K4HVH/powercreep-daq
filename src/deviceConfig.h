@@ -149,48 +149,48 @@ struct OutputConfig {
  * • Use voltage dividers if measuring >2.45V on analog inputs
  */
 
-// 16 Channels: 6 ADC + 4 digital + 1 HX711 + 4 I2C/SPI sensors + 1 PCNT sensor (v3 format)
+// 11 Channels: 1 ADC (pot) + 3 digital (switches) + 1 HX711 + 4 I2C sensors + 1 SPI sensor + 1 PCNT sensor (v3 format)
 // Format: {id, name, unit, sample_rate, acquisition_method, data_type, gpio_pin, enabled, pin_mode, adc_attenuation, peripheral_pin1-4, sensor_type}
 // Note: Use 255 for unused peripheral pins, 0 for SENSOR_NONE
 ChannelConfig channels[] = {
-    // Real ADC channels (ESP32 ADC1: GPIO32-39)
+    // B10K Potentiometer (0-3.3V on ADC)
     // Using DATA_UINT16 for ESP32 12-bit ADC (0-4095 range)
-    {0, "ADC0_GPIO32", "V", 1000, ACQ_ADC, DATA_UINT16, 32, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
-    {1, "ADC1_GPIO33", "V", 1000, ACQ_ADC, DATA_UINT16, 33, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
-    {2, "ADC2_GPIO34", "V", 1000, ACQ_ADC, DATA_UINT16, 34, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
-    {3, "ADC3_GPIO35", "V", 1000, ACQ_ADC, DATA_UINT16, 35, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
-    {4, "ADC4_GPIO36", "V", 1000, ACQ_ADC, DATA_UINT16, 36, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
-    {5, "ADC5_GPIO39", "V", 1000, ACQ_ADC, DATA_UINT16, 39, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
+    {0, "Pot_B10K", "", 100, ACQ_ADC, DATA_UINT16, 32, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
+
+    // 2-way switch (GPIO14, pull-up resistor, 0=pressed/LOW, 1=open/HIGH)
+    // Using DATA_UINT8 for digital inputs (0=LOW, 1=HIGH)
+    {1, "Switch_2Way", "", 100, ACQ_GPIO, DATA_UINT8, 14, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
+
+    // 3-way switch (2 GPIO pins to detect 3 positions)
+    // Position 1: A=LOW,  B=LOW   (00)
+    // Position 2: A=HIGH, B=LOW   (10)
+    // Position 3: A=LOW,  B=HIGH  (01)
+    {2, "Switch_3Way_A", "", 100, ACQ_GPIO, DATA_UINT8, 15, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
+    {3, "Switch_3Way_B", "", 100, ACQ_GPIO, DATA_UINT8, 27, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
 
     // HX711 Load Cell (DOUT=GPIO12, SCK=GPIO13)
     // Using DATA_INT24 for 24-bit signed load cell values
-    {6, "LoadCell", "g", 10, ACQ_HX711, DATA_INT24, 12, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 13, 255, 255, 255, 1},
-
-    // Digital input channels with pull-up resistors
-    // Using DATA_UINT8 for digital inputs (0=LOW, 1=HIGH)
-    {7, "DIN_GPIO14", "", 1000, ACQ_GPIO, DATA_UINT8, 14, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
-    {8, "DIN_GPIO15", "", 1000, ACQ_GPIO, DATA_UINT8, 15, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
-    {9, "DIN_GPIO27", "", 1000, ACQ_GPIO, DATA_UINT8, 27, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
+    {4, "LoadCell", "g", 10, ACQ_HX711, DATA_INT24, 12, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 13, 255, 255, 255, 1},
 
     // AHT10 Temperature & Humidity (I2C, address 0x38, SDA=GPIO21, SCL=GPIO22)
     // Using DATA_FLOAT32 for calibrated values (temp in °C, humidity in %)
     // Sample rate: 10Hz (sensor has 75ms measurement time)
     // Polled in background task to avoid blocking DAQ task with I2C timeouts
-    {10, "AHT10_Temp", "C", 10, ACQ_I2C_ADC, DATA_FLOAT32, 21, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 21, 22, 255, 255, 10},
-    {11, "AHT10_Humidity", "%", 10, ACQ_I2C_ADC, DATA_FLOAT32, 21, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 21, 22, 255, 255, 10},
+    {5, "AHT10_Temp", "C", 10, ACQ_I2C_ADC, DATA_FLOAT32, 21, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 21, 22, 255, 255, 10},
+    {6, "AHT10_Humidity", "%", 10, ACQ_I2C_ADC, DATA_FLOAT32, 21, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 21, 22, 255, 255, 10},
 
     // BMP280 Pressure & Temperature (I2C, address 0x76, SDA=GPIO21, SCL=GPIO22)
     // Using DATA_FLOAT32 for calibrated values (temp in °C, pressure in Pa)
     // Sample rate: 50Hz (sensor has ~10ms measurement time at lowest oversampling)
     // Polled in background task to avoid blocking DAQ task with I2C timeouts
-    {12, "BMP280_Temp", "C", 50, ACQ_I2C_ADC, DATA_FLOAT32, 21, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 21, 22, 255, 255, 11},
-    {13, "BMP280_Pressure", "Pa", 50, ACQ_I2C_ADC, DATA_FLOAT32, 21, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 21, 22, 255, 255, 11},
+    {7, "BMP280_Temp", "C", 50, ACQ_I2C_ADC, DATA_FLOAT32, 21, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 21, 22, 255, 255, 11},
+    {8, "BMP280_Pressure", "Pa", 50, ACQ_I2C_ADC, DATA_FLOAT32, 21, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 21, 22, 255, 255, 11},
 
     // MAX6675 Thermocouple (SPI, CS=GPIO5, SCK=GPIO18, MISO=GPIO19)
     // Using DATA_FLOAT32 for temperature in °C (0.25°C resolution)
     // Sample rate: 4Hz (MAX6675 has 220ms conversion time)
     // Polled in background task to avoid blocking DAQ task with SPI timeouts
-    {14, "MAX6675_Temp", "C", 4, ACQ_SPI_ADC, DATA_FLOAT32, 5, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 5, 255, 255, 255, 20},
+    {9, "MAX6675_Temp", "C", 4, ACQ_SPI_ADC, DATA_FLOAT32, 5, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 5, 255, 255, 255, 20},
 
     // NJK-5002C Hall Effect RPM Sensor (PCNT, signal on GPIO26)
     // Using DATA_UINT16 for RPM (0-65535 range)
@@ -198,42 +198,29 @@ ChannelConfig channels[] = {
     // Hardware PCNT counter for 0-12000 RPM range
     // NPN output pulls LOW on magnet detection (count on falling edge)
     // peripheral_pin1 = pulses_per_revolution (1 for single magnet setup)
-    {15, "NJK5002C_RPM", "RPM", 50, ACQ_PCNT, DATA_UINT16, 26, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 1, 255, 255, 255, 30},
+    {10, "NJK5002C_RPM", "RPM", 50, ACQ_PCNT, DATA_UINT16, 26, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 1, 255, 255, 255, 30},
 };
 
 constexpr uint8_t NUM_CHANNELS = sizeof(channels) / sizeof(channels[0]);
 
 // Output pins with different capabilities
 OutputConfig outputs[] = {
-    // GPIO-only outputs
-    {2,  "LED_Builtin", OUTPUT_CAP_GPIO},
+    // User-controllable PWM output (supports GPIO, PWM, and DAC)
+    {25, "PWM_Output", OUTPUT_CAP_GPIO | OUTPUT_CAP_PWM | OUTPUT_CAP_DAC},
 
-    // Peripheral-reserved pins (v3: firmware-controlled, cannot be controlled by user via GPIO/PWM/DAC)
-    // HX711 SCK
-    {13, "HX711_SCK", OUTPUT_CAP_PERIPHERAL},
-
-    // I2C (default ESP32 pins)
-    {21, "I2C_SDA", OUTPUT_CAP_PERIPHERAL},
-    {22, "I2C_SCL", OUTPUT_CAP_PERIPHERAL},
-
-    // SPI (default VSPI pins)
-    {5,  "SPI_CS", OUTPUT_CAP_PERIPHERAL},
-    {18, "SPI_SCK", OUTPUT_CAP_PERIPHERAL},
-    {19, "SPI_MISO", OUTPUT_CAP_PERIPHERAL},
-    {23, "SPI_MOSI", OUTPUT_CAP_PERIPHERAL},
-
-    // UART (Serial2 default pins)
-    {16, "UART2_RX", OUTPUT_CAP_PERIPHERAL},
-    {17, "UART2_TX", OUTPUT_CAP_PERIPHERAL},
-
-    // User-controllable PWM outputs
-    {4,  "PWM_GPIO4", OUTPUT_CAP_GPIO | OUTPUT_CAP_PWM},
-
-    // DAC outputs (ESP32 has 2 DAC pins)
-    {25, "DAC1_GPIO25", OUTPUT_CAP_GPIO | OUTPUT_CAP_PWM | OUTPUT_CAP_DAC},
-
-    // PCNT input (reserved for NJK-5002C RPM sensor)
-    {26, "PCNT_RPM", OUTPUT_CAP_PERIPHERAL},
+    // Reserved input pins (cannot be controlled by user via GPIO/PWM/DAC commands)
+    {32, "ADC_Pot", OUTPUT_CAP_PERIPHERAL},          // B10K potentiometer
+    {14, "GPIO_Switch2Way", OUTPUT_CAP_PERIPHERAL},  // 2-way switch
+    {15, "GPIO_Switch3Way_A", OUTPUT_CAP_PERIPHERAL},// 3-way switch A
+    {27, "GPIO_Switch3Way_B", OUTPUT_CAP_PERIPHERAL},// 3-way switch B
+    {12, "HX711_DOUT", OUTPUT_CAP_PERIPHERAL},       // HX711 data
+    {13, "HX711_SCK", OUTPUT_CAP_PERIPHERAL},        // HX711 clock
+    {21, "I2C_SDA", OUTPUT_CAP_PERIPHERAL},          // I2C data (AHT10, BMP280)
+    {22, "I2C_SCL", OUTPUT_CAP_PERIPHERAL},          // I2C clock (AHT10, BMP280)
+    {5,  "SPI_CS", OUTPUT_CAP_PERIPHERAL},           // SPI chip select (MAX6675)
+    {18, "SPI_SCK", OUTPUT_CAP_PERIPHERAL},          // SPI clock (MAX6675)
+    {19, "SPI_MISO", OUTPUT_CAP_PERIPHERAL},         // SPI data in (MAX6675)
+    {26, "PCNT_RPM", OUTPUT_CAP_PERIPHERAL},         // PCNT input (NJK-5002C RPM)
 };
 
 constexpr uint8_t NUM_OUTPUTS = sizeof(outputs) / sizeof(outputs[0]);

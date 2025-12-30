@@ -645,7 +645,7 @@ public:
     }
 
     // Optimized read function with minimal branching for hot path
-    static inline uint32_t read(const ChannelConfig& ch) {
+    static inline uint32_t read(const ChannelConfig& ch, const ChannelConfig* all_channels, uint8_t num_channels) {
         // Fast path: GPIO and ADC (most common, no state)
         if (ch.acquisition_method == ACQ_GPIO) {
             return digitalRead(ch.gpio_pin) ? 1 : 0;
@@ -656,7 +656,7 @@ public:
         }
 
         // Slow path: complex sensors (already decimated by caller)
-        return readComplexSensor(ch);
+        return readComplexSensor(ch, all_channels, num_channels);
     }
 
     // Background sensor polling function (called by sensorPollingTask)
@@ -680,50 +680,65 @@ public:
             spi_initialized = true;
         }
 
-        // Check which sensors are enabled by scanning all channels
-        bool aht10_enabled = false;
-        bool bmp280_enabled = false;
-        bool max6675_enabled = false;
-        bool pcnt_enabled = false;
+        // Check which sensors are enabled and capture their first channel_id
+        // Using 255 as sentinel value for "not found"
+        uint8_t aht10_ch = 255, bmp280_ch = 255, max6675_ch = 255, pcnt_ch = 255;
 
         for (uint8_t i = 0; i < num_channels; i++) {
             if (!channels[i].enabled) continue;
+
             if (channels[i].acquisition_method == ACQ_I2C_ADC) {
-                if (channels[i].sensor_type == 10) aht10_enabled = true;
-                if (channels[i].sensor_type == 11) bmp280_enabled = true;
+                if (channels[i].sensor_type == 10 && aht10_ch == 255) {
+                    aht10_ch = channels[i].channel_id;
+                }
+                if (channels[i].sensor_type == 11 && bmp280_ch == 255) {
+                    bmp280_ch = channels[i].channel_id;
+                }
             }
             if (channels[i].acquisition_method == ACQ_SPI_ADC) {
-                if (channels[i].sensor_type == 20) max6675_enabled = true;
+                if (channels[i].sensor_type == 20 && max6675_ch == 255) {
+                    max6675_ch = channels[i].channel_id;
+                }
             }
             if (channels[i].acquisition_method == ACQ_PCNT) {
-                if (channels[i].sensor_type == 30) pcnt_enabled = true;
+                if (channels[i].sensor_type == 30 && pcnt_ch == 255) {
+                    pcnt_ch = channels[i].channel_id;
+                }
             }
         }
 
         // Lazy initialization for I2C sensors (must be done from this task)
-        if (aht10_enabled && !channel_states_[10].initialized) {
+        if (aht10_ch != 255 && !channel_states_[aht10_ch].initialized) {
             if (aht10_.begin()) {
-                channel_states_[10].initialized = true;
-                channel_states_[11].initialized = true;
-                delay(20); // Let sensor stabilize
+                // Mark all AHT10 channels as initialized
+                for (uint8_t i = 0; i < num_channels; i++) {
+                    if (channels[i].enabled && channels[i].sensor_type == 10) {
+                        channel_states_[channels[i].channel_id].initialized = true;
+                    }
+                }
+                delay(20);
             }
         }
 
-        if (bmp280_enabled && !channel_states_[12].initialized) {
+        if (bmp280_ch != 255 && !channel_states_[bmp280_ch].initialized) {
             if (bmp280_.begin()) {
-                channel_states_[12].initialized = true;
-                channel_states_[13].initialized = true;
-                delay(20); // Let sensor stabilize
+                // Mark all BMP280 channels as initialized
+                for (uint8_t i = 0; i < num_channels; i++) {
+                    if (channels[i].enabled && channels[i].sensor_type == 11) {
+                        channel_states_[channels[i].channel_id].initialized = true;
+                    }
+                }
+                delay(20);
             }
         }
 
         // Lazy initialization for SPI sensors (must be done from this task)
-        if (max6675_enabled && !channel_states_[14].initialized) {
+        if (max6675_ch != 255 && !channel_states_[max6675_ch].initialized) {
             // Find the CS pin from channel config
             for (uint8_t i = 0; i < num_channels; i++) {
-                if (channels[i].channel_id == 14 && channels[i].enabled) {
+                if (channels[i].enabled && channels[i].sensor_type == 20) {
                     if (max6675_.begin(channels[i].peripheral_pin1)) {
-                        channel_states_[14].initialized = true;
+                        channel_states_[channels[i].channel_id].initialized = true;
                     }
                     break;
                 }
@@ -731,7 +746,7 @@ public:
         }
 
         // Poll each enabled sensor once (not per-channel!)
-        if (aht10_enabled && channel_states_[10].initialized) {
+        if (aht10_ch != 255 && channel_states_[aht10_ch].initialized) {
             if (!aht10_pending_) {
                 aht10_.startConversion();
                 aht10_pending_ = true;
@@ -745,7 +760,7 @@ public:
             }
         }
 
-        if (bmp280_enabled && channel_states_[12].initialized) {
+        if (bmp280_ch != 255 && channel_states_[bmp280_ch].initialized) {
             if (!bmp280_pending_) {
                 bmp280_.startConversion();
                 bmp280_pending_ = true;
@@ -759,14 +774,14 @@ public:
             }
         }
 
-        if (max6675_enabled && channel_states_[14].initialized) {
+        if (max6675_ch != 255 && channel_states_[max6675_ch].initialized) {
             float temp;
             if (max6675_.read(temp)) {
                 sensor_cache_.max6675_temp = temp;
             }
         }
 
-        if (pcnt_enabled && channel_states_[15].initialized) {
+        if (pcnt_ch != 255 && channel_states_[pcnt_ch].initialized) {
             uint16_t rpm;
             if (pcnt_.read(rpm)) {
                 sensor_cache_.njk5002c_rpm = rpm;
@@ -775,8 +790,23 @@ public:
     }
 
 private:
+    // Helper: Find which output index this channel is for multi-output sensors
+    // Returns 0 for first channel with this sensor_type, 1 for second, etc.
+    static inline uint8_t getOutputIndex(const ChannelConfig& ch, const ChannelConfig* all_channels, uint8_t num_channels) {
+        uint8_t index = 0;
+        for (uint8_t i = 0; i < num_channels; i++) {
+            if (all_channels[i].sensor_type == ch.sensor_type) {
+                if (all_channels[i].channel_id == ch.channel_id) {
+                    return index; // Found our channel
+                }
+                index++;
+            }
+        }
+        return 0; // Default to first output
+    }
+
     // Read complex sensors (HX711 is fast non-blocking, I2C/SPI use cache)
-    static uint32_t readComplexSensor(const ChannelConfig& ch) {
+    static uint32_t readComplexSensor(const ChannelConfig& ch, const ChannelConfig* all_channels, uint8_t num_channels) {
         switch (ch.acquisition_method) {
             case ACQ_HX711: {
                 // HX711 is fast (~50µs when ready), read directly
@@ -790,11 +820,15 @@ private:
 
             case ACQ_I2C_ADC:
                 if (ch.sensor_type == 10) { // SENSOR_AHT10
-                    float value = (ch.channel_id == 10) ? sensor_cache_.aht10_temp : sensor_cache_.aht10_humidity;
+                    // Use channel ordering: 0 = temp, 1 = humidity
+                    uint8_t idx = getOutputIndex(ch, all_channels, num_channels);
+                    float value = (idx == 0) ? sensor_cache_.aht10_temp : sensor_cache_.aht10_humidity;
                     return *(uint32_t*)&value;
                 }
                 if (ch.sensor_type == 11) { // SENSOR_BMP280
-                    float value = (ch.channel_id == 12) ? sensor_cache_.bmp280_temp : sensor_cache_.bmp280_pressure;
+                    // Use channel ordering: 0 = temp, 1 = pressure
+                    uint8_t idx = getOutputIndex(ch, all_channels, num_channels);
+                    float value = (idx == 0) ? sensor_cache_.bmp280_temp : sensor_cache_.bmp280_pressure;
                     return *(uint32_t*)&value;
                 }
                 return 0;
