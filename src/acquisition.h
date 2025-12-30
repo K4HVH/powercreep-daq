@@ -359,17 +359,17 @@ public:
 class MAX6675Reader {
 private:
     uint8_t cs_pin_;
-    float last_temp_;
     unsigned long last_read_ms_;
 
 public:
-    void begin(uint8_t cs_pin) {
+    bool begin(uint8_t cs_pin) {
+        // NOTE: SPI.begin() must be called ONCE before initializing any SPI sensors
         cs_pin_ = cs_pin;
         pinMode(cs_pin_, OUTPUT);
         digitalWrite(cs_pin_, HIGH);
-        SPI.begin();
-        last_temp_ = 0;
         last_read_ms_ = 0;
+        delay(250); // MAX6675 requires 240ms power-on delay
+        return true;
     }
 
     // Read temperature (MAX6675 needs 220ms between conversions)
@@ -379,7 +379,12 @@ public:
             return false;
         }
 
-        SPI.beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE0));
+        // Timeout safety: prevent runaway state
+        if (last_read_ms_ != 0 && millis() - last_read_ms_ > 5000) {
+            last_read_ms_ = millis(); // Reset to prevent overflow issues
+        }
+
+        SPI.beginTransaction(SPISettings(5000000, MSBFIRST, SPI_MODE0));
         digitalWrite(cs_pin_, LOW);
         delayMicroseconds(1);
 
@@ -388,19 +393,20 @@ public:
         digitalWrite(cs_pin_, HIGH);
         SPI.endTransaction();
 
-        // Check for errors
-        if (data & 0x04) return false; // Thermocouple open circuit
+        // Enhanced error detection
+        if (data & 0x04) return false; // Thermocouple open circuit (bit 2)
+        if (data == 0xFFFF || data == 0x0000) return false; // Bus error or sensor fault
 
         // Extract temperature (bits 14-3, 0.25°C resolution)
-        data >>= 3;
-        temp_c = data * 0.25f;
+        uint16_t raw_temp = data >> 3;
+        temp_c = raw_temp * 0.25f;
 
-        last_temp_ = temp_c;
+        // Validate temperature range (MAX6675 is 0-1024°C)
+        if (temp_c < 0 || temp_c > 1024.0f) return false;
+
         last_read_ms_ = millis();
         return true;
     }
-
-    float getLastTemp() const { return last_temp_; }
 };
 
 // ======================== SENSOR CACHE (Thread-safe) ========================
@@ -490,10 +496,7 @@ public:
                     break;
 
                 case ACQ_SPI_ADC:
-                    if (channels[i].sensor_type == 20) {
-                        max6675_.begin(channels[i].peripheral_pin1);
-                        channel_states_[channels[i].channel_id].initialized = true;
-                    }
+                    // SPI sensors initialized lazily in polling task (Core 0)
                     break;
 
                 default:
@@ -524,15 +527,20 @@ public:
     // NOTE: HX711 is NOT polled here - it's fast enough to read directly in DAQ task
     // NOTE: Polls each unique sensor once (not per-channel) to avoid state conflicts
     static void pollSensors(const ChannelConfig* channels, uint8_t num_channels) {
-        // One-time initialization: Wire.begin() must be called from this task (Core 0)
+        // One-time initialization: Wire.begin() and SPI.begin() must be called from this task (Core 0)
         static bool i2c_initialized = false;
+        static bool spi_initialized = false;
+
         if (!i2c_initialized) {
             Wire.begin();
-
-            // Give bus time to stabilize
-            delay(50);
-
+            delay(50); // Give bus time to stabilize
             i2c_initialized = true;
+        }
+
+        if (!spi_initialized) {
+            SPI.begin();
+            delay(10); // Give bus time to stabilize
+            spi_initialized = true;
         }
 
         // Check which sensors are enabled by scanning all channels
@@ -552,7 +560,6 @@ public:
         }
 
         // Lazy initialization for I2C sensors (must be done from this task)
-        // Initialize AHT10 first (simpler sensor)
         if (aht10_enabled && !channel_states_[10].initialized) {
             if (aht10_.begin()) {
                 channel_states_[10].initialized = true;
@@ -561,12 +568,24 @@ public:
             }
         }
 
-        // Initialize BMP280 second
         if (bmp280_enabled && !channel_states_[12].initialized) {
             if (bmp280_.begin()) {
                 channel_states_[12].initialized = true;
                 channel_states_[13].initialized = true;
                 delay(20); // Let sensor stabilize
+            }
+        }
+
+        // Lazy initialization for SPI sensors (must be done from this task)
+        if (max6675_enabled && !channel_states_[14].initialized) {
+            // Find the CS pin from channel config
+            for (uint8_t i = 0; i < num_channels; i++) {
+                if (channels[i].channel_id == 14 && channels[i].enabled) {
+                    if (max6675_.begin(channels[i].peripheral_pin1)) {
+                        channel_states_[14].initialized = true;
+                    }
+                    break;
+                }
             }
         }
 
@@ -599,7 +618,7 @@ public:
             }
         }
 
-        if (max6675_enabled) {
+        if (max6675_enabled && channel_states_[14].initialized) {
             float temp;
             if (max6675_.read(temp)) {
                 sensor_cache_.max6675_temp = temp;
