@@ -159,22 +159,13 @@ public:
         // NOTE: Wire.begin() must be called ONCE before initializing any I2C sensors
         delay(40); // AHT10 requires 40ms power-on delay
 
-        // Soft reset the sensor
+        // Soft reset the sensor (AHT10 auto-initializes after reset, no 0xE1 needed)
         Wire.beginTransmission(AHT10_ADDR);
         Wire.write(0xBA); // Soft reset command
-        uint8_t error = Wire.endTransmission();
-        if (error != 0) {
+        if (Wire.endTransmission() != 0) {
             return false;
         }
         delay(20); // Wait for reset to complete
-
-        // Skip explicit init - AHT10 auto-initializes after reset
-        // Just verify the sensor responds
-        Wire.beginTransmission(AHT10_ADDR);
-        error = Wire.endTransmission();
-        if (error != 0) {
-            return false;
-        }
 
         last_temp_ = 0;
         last_humidity_ = 0;
