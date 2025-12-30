@@ -156,17 +156,26 @@ private:
 
 public:
     bool begin() {
-        Wire.begin();
+        // NOTE: Wire.begin() must be called ONCE before initializing any I2C sensors
         delay(40); // AHT10 requires 40ms power-on delay
 
-        // Initialize sensor
+        // Soft reset the sensor
         Wire.beginTransmission(AHT10_ADDR);
-        Wire.write(AHT10_CMD_INIT);
-        Wire.write(0x08);
-        Wire.write(0x00);
-        if (Wire.endTransmission() != 0) return false;
+        Wire.write(0xBA); // Soft reset command
+        uint8_t error = Wire.endTransmission();
+        if (error != 0) {
+            return false;
+        }
+        delay(20); // Wait for reset to complete
 
-        delay(10);
+        // Skip explicit init - AHT10 auto-initializes after reset
+        // Just verify the sensor responds
+        Wire.beginTransmission(AHT10_ADDR);
+        error = Wire.endTransmission();
+        if (error != 0) {
+            return false;
+        }
+
         last_temp_ = 0;
         last_humidity_ = 0;
         conversion_start_ms_ = 0;
@@ -250,7 +259,7 @@ private:
 
 public:
     bool begin() {
-        Wire.begin();
+        // NOTE: Wire.begin() must be called ONCE before initializing any I2C sensors
 
         // Read calibration data
         Wire.beginTransmission(BMP280_ADDR);
@@ -297,6 +306,11 @@ public:
             return false;
         }
 
+        // Timeout safety: if conversion took >100ms, something is wrong
+        if (millis() - conversion_start_ms_ > 100) {
+            return false; // Force retry by resetting pending flag
+        }
+
         // Read raw data (pressure + temperature)
         Wire.beginTransmission(BMP280_ADDR);
         Wire.write(BMP280_REG_DATA);
@@ -304,8 +318,18 @@ public:
 
         if (Wire.requestFrom(BMP280_ADDR, 6) != 6) return false;
 
-        int32_t adc_P = ((int32_t)Wire.read() << 12) | ((int32_t)Wire.read() << 4) | ((int32_t)Wire.read() >> 4);
-        int32_t adc_T = ((int32_t)Wire.read() << 12) | ((int32_t)Wire.read() << 4) | ((int32_t)Wire.read() >> 4);
+        // Read pressure (MSB first, 20-bit value in upper bits of 3 bytes)
+        uint8_t press_msb = Wire.read();   // [19:12]
+        uint8_t press_lsb = Wire.read();   // [11:4]
+        uint8_t press_xlsb = Wire.read();  // [3:0] in upper nibble
+
+        // Read temperature (MSB first, 20-bit value in upper bits of 3 bytes)
+        uint8_t temp_msb = Wire.read();    // [19:12]
+        uint8_t temp_lsb = Wire.read();    // [11:4]
+        uint8_t temp_xlsb = Wire.read();   // [3:0] in upper nibble
+
+        int32_t adc_P = ((int32_t)press_msb << 12) | ((int32_t)press_lsb << 4) | ((int32_t)press_xlsb >> 4);
+        int32_t adc_T = ((int32_t)temp_msb << 12) | ((int32_t)temp_lsb << 4) | ((int32_t)temp_xlsb >> 4);
 
         // Compensate temperature
         int32_t var1 = ((((adc_T >> 3) - ((int32_t)dig_T1 << 1))) * ((int32_t)dig_T2)) >> 11;
@@ -457,6 +481,7 @@ public:
     }
 
     // Pre-initialize sensors for enabled channels (called once from main)
+    // NOTE: I2C sensors are initialized lazily from the sensor polling task
     static void initializeSensors(const ChannelConfig* channels, uint8_t num_channels) {
         if (sensors_initialized_) return;
 
@@ -470,16 +495,7 @@ public:
                     break;
 
                 case ACQ_I2C_ADC:
-                    if (channels[i].sensor_type == 10 && !channel_states_[10].initialized) {
-                        aht10_.begin();
-                        channel_states_[10].initialized = true;
-                        channel_states_[11].initialized = true; // Both AHT10 channels
-                    }
-                    else if (channels[i].sensor_type == 11 && !channel_states_[12].initialized) {
-                        bmp280_.begin();
-                        channel_states_[12].initialized = true;
-                        channel_states_[13].initialized = true; // Both BMP280 channels
-                    }
+                    // I2C sensors initialized lazily in polling task (Core 0)
                     break;
 
                 case ACQ_SPI_ADC:
@@ -515,53 +531,87 @@ public:
     // Background sensor polling function (called by sensorPollingTask)
     // This handles all I2C/SPI communication and timeouts off the critical path
     // NOTE: HX711 is NOT polled here - it's fast enough to read directly in DAQ task
+    // NOTE: Polls each unique sensor once (not per-channel) to avoid state conflicts
     static void pollSensors(const ChannelConfig* channels, uint8_t num_channels) {
+        // One-time initialization: Wire.begin() must be called from this task (Core 0)
+        static bool i2c_initialized = false;
+        if (!i2c_initialized) {
+            Wire.begin();
+
+            // Give bus time to stabilize
+            delay(50);
+
+            i2c_initialized = true;
+        }
+
+        // Check which sensors are enabled by scanning all channels
+        bool aht10_enabled = false;
+        bool bmp280_enabled = false;
+        bool max6675_enabled = false;
+
         for (uint8_t i = 0; i < num_channels; i++) {
             if (!channels[i].enabled) continue;
+            if (channels[i].acquisition_method == ACQ_I2C_ADC) {
+                if (channels[i].sensor_type == 10) aht10_enabled = true;
+                if (channels[i].sensor_type == 11) bmp280_enabled = true;
+            }
+            if (channels[i].acquisition_method == ACQ_SPI_ADC) {
+                if (channels[i].sensor_type == 20) max6675_enabled = true;
+            }
+        }
 
-            switch (channels[i].acquisition_method) {
-                case ACQ_I2C_ADC: {
-                    if (channels[i].sensor_type == 10) { // SENSOR_AHT10
-                        if (!aht10_pending_) {
-                            aht10_.startConversion();
-                            aht10_pending_ = true;
-                        } else {
-                            float temp, humidity;
-                            if (aht10_.read(temp, humidity)) {
-                                sensor_cache_.aht10_temp = temp;
-                                sensor_cache_.aht10_humidity = humidity;
-                                aht10_pending_ = false;
-                            }
-                        }
-                    }
-                    else if (channels[i].sensor_type == 11) { // SENSOR_BMP280
-                        if (!bmp280_pending_) {
-                            bmp280_.startConversion();
-                            bmp280_pending_ = true;
-                        } else {
-                            float temp, pressure;
-                            if (bmp280_.read(temp, pressure)) {
-                                sensor_cache_.bmp280_temp = temp;
-                                sensor_cache_.bmp280_pressure = pressure;
-                                bmp280_pending_ = false;
-                            }
-                        }
-                    }
-                    break;
+        // Lazy initialization for I2C sensors (must be done from this task)
+        // Initialize AHT10 first (simpler sensor)
+        if (aht10_enabled && !channel_states_[10].initialized) {
+            if (aht10_.begin()) {
+                channel_states_[10].initialized = true;
+                channel_states_[11].initialized = true;
+                delay(20); // Let sensor stabilize
+            }
+        }
+
+        // Initialize BMP280 second
+        if (bmp280_enabled && !channel_states_[12].initialized) {
+            if (bmp280_.begin()) {
+                channel_states_[12].initialized = true;
+                channel_states_[13].initialized = true;
+                delay(20); // Let sensor stabilize
+            }
+        }
+
+        // Poll each enabled sensor once (not per-channel!)
+        if (aht10_enabled && channel_states_[10].initialized) {
+            if (!aht10_pending_) {
+                aht10_.startConversion();
+                aht10_pending_ = true;
+            } else {
+                float temp, humidity;
+                if (aht10_.read(temp, humidity)) {
+                    sensor_cache_.aht10_temp = temp;
+                    sensor_cache_.aht10_humidity = humidity;
+                    aht10_pending_ = false;
                 }
+            }
+        }
 
-                case ACQ_SPI_ADC: {
-                    if (channels[i].sensor_type == 20) { // SENSOR_MAX6675
-                        float temp;
-                        if (max6675_.read(temp)) {
-                            sensor_cache_.max6675_temp = temp;
-                        }
-                    }
-                    break;
+        if (bmp280_enabled && channel_states_[12].initialized) {
+            if (!bmp280_pending_) {
+                bmp280_.startConversion();
+                bmp280_pending_ = true;
+            } else {
+                float temp, pressure;
+                if (bmp280_.read(temp, pressure)) {
+                    sensor_cache_.bmp280_temp = temp;
+                    sensor_cache_.bmp280_pressure = pressure;
+                    bmp280_pending_ = false;
                 }
+            }
+        }
 
-                default:
-                    break;
+        if (max6675_enabled) {
+            float temp;
+            if (max6675_.read(temp)) {
+                sensor_cache_.max6675_temp = temp;
             }
         }
     }
