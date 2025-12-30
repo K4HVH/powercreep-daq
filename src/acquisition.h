@@ -22,6 +22,9 @@ enum SensorType : uint8_t {
     // SPI sensors
     SENSOR_MAX6675 = 20,    // K-Type thermocouple
     SENSOR_MCP3008 = 21,    // 10-bit 8-channel ADC
+
+    // PCNT sensors (hardware pulse counter)
+    SENSOR_NJK5002C = 30,   // Hall effect RPM sensor (NPN output)
 };
 
 // Sensor state tracking for non-blocking operation
@@ -409,6 +412,127 @@ public:
     }
 };
 
+// ======================== NJK-5002C RPM SENSOR (PCNT) ========================
+
+#include "driver/pcnt.h"
+
+class PCNTReader {
+private:
+    pcnt_unit_t pcnt_unit_;
+    uint8_t gpio_pin_;
+    uint16_t pulses_per_rev_;
+    unsigned long last_calc_ms_;
+    int16_t last_count_;
+    uint16_t last_rpm_;
+
+public:
+    bool begin(uint8_t gpio_pin, pcnt_unit_t unit = PCNT_UNIT_0, uint16_t pulses_per_rev = 1) {
+        gpio_pin_ = gpio_pin;
+        pcnt_unit_ = unit;
+        pulses_per_rev_ = pulses_per_rev;
+        last_calc_ms_ = 0;
+        last_count_ = 0;
+        last_rpm_ = 0;
+
+        // Configure PCNT unit
+        pcnt_config_t pcnt_config = {};
+        pcnt_config.pulse_gpio_num = gpio_pin_;
+        pcnt_config.ctrl_gpio_num = PCNT_PIN_NOT_USED;
+        pcnt_config.channel = PCNT_CHANNEL_0;
+        pcnt_config.unit = pcnt_unit_;
+        pcnt_config.pos_mode = PCNT_COUNT_DIS;  // Don't count on rising edge
+        pcnt_config.neg_mode = PCNT_COUNT_INC;  // Count on falling edge (NPN pulls LOW)
+        pcnt_config.lctrl_mode = PCNT_MODE_KEEP;
+        pcnt_config.hctrl_mode = PCNT_MODE_KEEP;
+        pcnt_config.counter_h_lim = 32767;
+        pcnt_config.counter_l_lim = -32768;
+
+        if (pcnt_unit_config(&pcnt_config) != ESP_OK) {
+            return false;
+        }
+
+        // Set filter to ignore glitches (1000 APB_CLK cycles ~= 12.5µs at 80MHz)
+        pcnt_set_filter_value(pcnt_unit_, 1000);
+        pcnt_filter_enable(pcnt_unit_);
+
+        // Clear and start counter
+        pcnt_counter_clear(pcnt_unit_);
+        pcnt_counter_resume(pcnt_unit_);
+
+        return true;
+    }
+
+    // Calculate RPM based on hardware pulse count
+    // Called at sample rate (e.g., 50Hz), uses adaptive accumulation window for accuracy
+    // Always returns a value - recalculates when enough pulses accumulated
+    bool read(uint16_t& rpm) {
+        unsigned long now = millis();
+
+        // Read hardware pulse count every time
+        int16_t count;
+        if (pcnt_get_counter_value(pcnt_unit_, &count) != ESP_OK) {
+            rpm = last_rpm_;
+            return false;
+        }
+
+        // On first call, initialize
+        if (last_calc_ms_ == 0) {
+            last_count_ = count;
+            last_calc_ms_ = now;
+            rpm = 0;
+            last_rpm_ = 0;
+            return true;
+        }
+
+        // Calculate pulses since last calculation
+        int16_t delta_count = count - last_count_;
+        if (delta_count < 0) delta_count = 0; // Handle overflow
+
+        unsigned long delta_ms = now - last_calc_ms_;
+
+        // Adaptive minimum window for accuracy:
+        // At high RPM (>3000): need minimum 2 pulses = ~10ms at 12k RPM
+        // At medium RPM (1000-3000): need minimum 3 pulses = ~60ms at 1k RPM
+        // At low RPM (<1000): need minimum 2 pulses = ~120ms at 500 RPM
+        bool should_recalculate = false;
+
+        if (last_rpm_ > 3000) {
+            // High RPM: recalculate if >10ms passed OR >2 pulses
+            should_recalculate = (delta_ms >= 10 && delta_count >= 2) || (delta_ms >= 20);
+        } else if (last_rpm_ > 1000) {
+            // Medium RPM: recalculate if >60ms passed OR >3 pulses
+            should_recalculate = (delta_ms >= 60 && delta_count >= 3) || (delta_ms >= 100);
+        } else if (last_rpm_ > 300) {
+            // Low RPM: recalculate if >120ms passed OR >2 pulses
+            should_recalculate = (delta_ms >= 120 && delta_count >= 2) || (delta_ms >= 200);
+        } else {
+            // Very low RPM: recalculate every 500ms minimum
+            should_recalculate = (delta_ms >= 500);
+        }
+
+        if (should_recalculate && delta_ms > 0) {
+            // Recalculate RPM: (pulses / pulses_per_rev) * (60000 ms/min / delta_ms)
+            if (pulses_per_rev_ > 0) {
+                rpm = (uint16_t)((delta_count * 60000UL) / (pulses_per_rev_ * delta_ms));
+            } else {
+                rpm = 0;
+            }
+
+            // Update state
+            last_count_ = count;
+            last_calc_ms_ = now;
+            last_rpm_ = rpm;
+        } else {
+            // Return cached value (not enough data yet for accurate update)
+            rpm = last_rpm_;
+        }
+
+        return true;
+    }
+
+    uint16_t getLastRPM() const { return last_rpm_; }
+};
+
 // ======================== SENSOR CACHE (Thread-safe) ========================
 
 // Global cache for complex sensor values:
@@ -428,6 +552,9 @@ struct SensorCache {
 
     // MAX6675 Thermocouple
     float max6675_temp;
+
+    // NJK-5002C RPM Sensor
+    uint16_t njk5002c_rpm;
 };
 
 // ======================== UNIFIED ACQUISITION SYSTEM ========================
@@ -439,6 +566,7 @@ private:
     static AHT10Reader aht10_;
     static BMP280Reader bmp280_;
     static MAX6675Reader max6675_;
+    static PCNTReader pcnt_;
 
     // Per-channel state tracking
     static SensorState channel_states_[16];
@@ -499,6 +627,15 @@ public:
                     // SPI sensors initialized lazily in polling task (Core 0)
                     break;
 
+                case ACQ_PCNT:
+                    if (channels[i].sensor_type == 30) { // SENSOR_NJK5002C
+                        // pulses_per_rev stored in peripheral_pin1 (typically 1 for single magnet)
+                        uint16_t ppr = (channels[i].peripheral_pin1 == 255) ? 1 : channels[i].peripheral_pin1;
+                        pcnt_.begin(channels[i].gpio_pin, PCNT_UNIT_0, ppr);
+                        channel_states_[channels[i].channel_id].initialized = true;
+                    }
+                    break;
+
                 default:
                     break;
             }
@@ -547,6 +684,7 @@ public:
         bool aht10_enabled = false;
         bool bmp280_enabled = false;
         bool max6675_enabled = false;
+        bool pcnt_enabled = false;
 
         for (uint8_t i = 0; i < num_channels; i++) {
             if (!channels[i].enabled) continue;
@@ -556,6 +694,9 @@ public:
             }
             if (channels[i].acquisition_method == ACQ_SPI_ADC) {
                 if (channels[i].sensor_type == 20) max6675_enabled = true;
+            }
+            if (channels[i].acquisition_method == ACQ_PCNT) {
+                if (channels[i].sensor_type == 30) pcnt_enabled = true;
             }
         }
 
@@ -624,6 +765,13 @@ public:
                 sensor_cache_.max6675_temp = temp;
             }
         }
+
+        if (pcnt_enabled && channel_states_[15].initialized) {
+            uint16_t rpm;
+            if (pcnt_.read(rpm)) {
+                sensor_cache_.njk5002c_rpm = rpm;
+            }
+        }
     }
 
 private:
@@ -657,6 +805,12 @@ private:
                 }
                 return 0;
 
+            case ACQ_PCNT:
+                if (ch.sensor_type == 30) { // SENSOR_NJK5002C
+                    return (uint32_t)sensor_cache_.njk5002c_rpm;
+                }
+                return 0;
+
             default:
                 return 0;
         }
@@ -669,6 +823,7 @@ HX711Reader Acquisition::hx711_;
 AHT10Reader Acquisition::aht10_;
 BMP280Reader Acquisition::bmp280_;
 MAX6675Reader Acquisition::max6675_;
+PCNTReader Acquisition::pcnt_;
 SensorState Acquisition::channel_states_[16];
 bool Acquisition::sensors_initialized_ = false;
 SensorCache Acquisition::sensor_cache_;

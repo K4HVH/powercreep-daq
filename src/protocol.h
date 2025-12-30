@@ -53,7 +53,7 @@ enum AcquisitionMethod : uint8_t {
     ACQ_SPI_ADC   = 0b011,  // External SPI ADC
     ACQ_I2C_ADC   = 0b100,  // External I2C ADC/sensor
     ACQ_UART      = 0b101,  // UART/Serial sensor
-    ACQ_RESERVED6 = 0b110,  // Reserved
+    ACQ_PCNT      = 0b110,  // Hardware pulse counter (RPM, frequency, encoders)
     ACQ_RESERVED7 = 0b111   // Reserved
 };
 

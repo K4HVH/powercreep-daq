@@ -149,7 +149,7 @@ struct OutputConfig {
  * • Use voltage dividers if measuring >2.45V on analog inputs
  */
 
-// 15 Channels: 6 ADC + 4 digital + 1 HX711 + 4 I2C/SPI sensors (v3 format)
+// 16 Channels: 6 ADC + 4 digital + 1 HX711 + 4 I2C/SPI sensors + 1 PCNT sensor (v3 format)
 // Format: {id, name, unit, sample_rate, acquisition_method, data_type, gpio_pin, enabled, pin_mode, adc_attenuation, peripheral_pin1-4, sensor_type}
 // Note: Use 255 for unused peripheral pins, 0 for SENSOR_NONE
 ChannelConfig channels[] = {
@@ -191,6 +191,14 @@ ChannelConfig channels[] = {
     // Sample rate: 4Hz (MAX6675 has 220ms conversion time)
     // Polled in background task to avoid blocking DAQ task with SPI timeouts
     {14, "MAX6675_Temp", "C", 4, ACQ_SPI_ADC, DATA_FLOAT32, 5, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 5, 255, 255, 255, 20},
+
+    // NJK-5002C Hall Effect RPM Sensor (PCNT, signal on GPIO26)
+    // Using DATA_UINT16 for RPM (0-65535 range)
+    // Sample rate: 50Hz (20ms updates, adaptive internal accumulation for accuracy)
+    // Hardware PCNT counter for 0-12000 RPM range
+    // NPN output pulls LOW on magnet detection (count on falling edge)
+    // peripheral_pin1 = pulses_per_revolution (1 for single magnet setup)
+    {15, "NJK5002C_RPM", "RPM", 50, ACQ_PCNT, DATA_UINT16, 26, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 1, 255, 255, 255, 30},
 };
 
 constexpr uint8_t NUM_CHANNELS = sizeof(channels) / sizeof(channels[0]);
@@ -223,7 +231,9 @@ OutputConfig outputs[] = {
 
     // DAC outputs (ESP32 has 2 DAC pins)
     {25, "DAC1_GPIO25", OUTPUT_CAP_GPIO | OUTPUT_CAP_PWM | OUTPUT_CAP_DAC},
-    {26, "DAC2_GPIO26", OUTPUT_CAP_GPIO | OUTPUT_CAP_PWM | OUTPUT_CAP_DAC},
+
+    // PCNT input (reserved for NJK-5002C RPM sensor)
+    {26, "PCNT_RPM", OUTPUT_CAP_PERIPHERAL},
 };
 
 constexpr uint8_t NUM_OUTPUTS = sizeof(outputs) / sizeof(outputs[0]);
