@@ -178,11 +178,71 @@ void daqTask(void* parameter) {
 
 // ======================== SENSOR POLLING TASK (Core 0, Background) ========================
 
+// Global state for software PWM control
+volatile uint32_t g_soft_pwm_freq = 1000; // Default 1kHz
+volatile uint8_t g_soft_pwm_duty_percent = 0;
+volatile bool g_pwm_initialized = false;
+
+void setSoftwarePWM(uint16_t freq, uint8_t duty_percent) {
+    g_soft_pwm_freq = freq;
+    g_soft_pwm_duty_percent = duty_percent;
+}
+
+void updatePWMOutput() {
+    // Pin definitions from deviceConfig.h
+    // Switch A: 15, Switch B: 27, Pot: 32, PWM: 25
+    const uint8_t PIN_SWITCH_A = 15; 
+    const uint8_t PIN_SWITCH_B = 27; 
+    const uint8_t PIN_POT = 32;
+    const uint8_t PIN_PWM = 25;
+    
+    // LEDC Configuration
+    const uint8_t LEDC_CHANNEL = PIN_PWM % 16;
+    const uint8_t LEDC_RESOLUTION = 10; // 10-bit (0-1023)
+
+    // Read switches (Active LOW for INPUT_PULLUP)
+    bool mode_manual = (digitalRead(PIN_SWITCH_A) == LOW);
+    bool mode_software = (digitalRead(PIN_SWITCH_B) == LOW);
+
+    uint32_t target_freq = g_soft_pwm_freq;
+    uint32_t target_duty = 0;
+
+    if (mode_software) {
+        // Software control (Switch B)
+        target_freq = g_soft_pwm_freq;
+        target_duty = (g_soft_pwm_duty_percent * 1023) / 100;
+    } else if (mode_manual) {
+        // Manual control (Switch A) -> Potentiometer
+        // Read Pot (0-4095)
+        uint32_t pot_val = analogRead(PIN_POT);
+        // Map to 10-bit PWM (0-1023)
+        target_duty = pot_val / 4; 
+    } else {
+        // OFF (Neither) -> PWM 0
+        target_duty = 0;
+    }
+
+    // Initialize or Update LEDC
+    static uint32_t last_freq = 0;
+    
+    if (!g_pwm_initialized || last_freq != target_freq) {
+        ledcSetup(LEDC_CHANNEL, target_freq, LEDC_RESOLUTION);
+        ledcAttachPin(PIN_PWM, LEDC_CHANNEL);
+        last_freq = target_freq;
+        g_pwm_initialized = true;
+    }
+
+    ledcWrite(LEDC_CHANNEL, target_duty);
+}
+
 // Background task that polls complex sensors (HX711, I2C, SPI) and updates cache.
 // This allows DAQ task to read cached values instantly without I2C/SPI timeout overhead.
 // Runs at low priority so it doesn't interfere with time-critical DAQ or comm tasks.
 void sensorPollingTask(void* parameter) {
     while (true) {
+        // Update PWM output based on switch state
+        updatePWMOutput();
+
         // Poll all enabled complex sensors (handles I2C/SPI timeouts gracefully)
         Acquisition::pollSensors(channels, NUM_CHANNELS);
 

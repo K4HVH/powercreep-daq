@@ -5,6 +5,9 @@
 #include "frameBuilder.h"
 #include "deviceConfig.h"
 
+// Forward declaration for software PWM control
+extern void setSoftwarePWM(uint16_t freq, uint8_t duty_percent);
+
 class CommandHandler {
 public:
     // Send ACK response
@@ -114,17 +117,8 @@ public:
             return;
         }
 
-        // Setup PWM using LEDC (ESP32)
-        // Use channel 0-15 (map pin to channel for simplicity)
-        uint8_t ledc_channel = pin % 16;
-        uint8_t ledc_resolution = 10;  // 10-bit resolution (0-1023)
-
-        ledcSetup(ledc_channel, frequency_hz, ledc_resolution);
-        ledcAttachPin(pin, ledc_channel);
-
-        // Convert duty percent to duty value
-        uint32_t duty_value = (duty_percent * 1023) / 100;
-        ledcWrite(ledc_channel, duty_value);
+        // Update software PWM state (hardware update handled in main loop based on switch state)
+        setSoftwarePWM(frequency_hz, duty_percent);
 
         sendACK(CMD_PWM, ACK_SUCCESS);
     }
