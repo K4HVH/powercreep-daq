@@ -25,6 +25,7 @@ enum SensorType : uint8_t {
 
     // PCNT sensors (hardware pulse counter)
     SENSOR_NJK5002C = 30,   // Hall effect RPM sensor (NPN output)
+    SENSOR_HP705A = 31,     // HP705A Clamp (Pulse output)
 };
 
 // Sensor state tracking for non-blocking operation
@@ -426,7 +427,8 @@ private:
     uint16_t last_rpm_;
 
 public:
-    bool begin(uint8_t gpio_pin, pcnt_unit_t unit = PCNT_UNIT_0, uint16_t pulses_per_rev = 1) {
+    bool begin(uint8_t gpio_pin, pcnt_unit_t unit = PCNT_UNIT_0, uint16_t pulses_per_rev = 1,
+               pcnt_count_mode_t pos_mode = PCNT_COUNT_DIS, pcnt_count_mode_t neg_mode = PCNT_COUNT_INC) {
         gpio_pin_ = gpio_pin;
         pcnt_unit_ = unit;
         pulses_per_rev_ = pulses_per_rev;
@@ -440,8 +442,8 @@ public:
         pcnt_config.ctrl_gpio_num = PCNT_PIN_NOT_USED;
         pcnt_config.channel = PCNT_CHANNEL_0;
         pcnt_config.unit = pcnt_unit_;
-        pcnt_config.pos_mode = PCNT_COUNT_DIS;  // Don't count on rising edge
-        pcnt_config.neg_mode = PCNT_COUNT_INC;  // Count on falling edge (NPN pulls LOW)
+        pcnt_config.pos_mode = pos_mode;
+        pcnt_config.neg_mode = neg_mode;
         pcnt_config.lctrl_mode = PCNT_MODE_KEEP;
         pcnt_config.hctrl_mode = PCNT_MODE_KEEP;
         pcnt_config.counter_h_lim = 32767;
@@ -555,6 +557,9 @@ struct SensorCache {
 
     // NJK-5002C RPM Sensor
     uint16_t njk5002c_rpm;
+
+    // HP705A Clamp
+    uint16_t hp705a_clamp;
 };
 
 // ======================== UNIFIED ACQUISITION SYSTEM ========================
@@ -567,6 +572,7 @@ private:
     static BMP280Reader bmp280_;
     static MAX6675Reader max6675_;
     static PCNTReader pcnt_;
+    static PCNTReader pcnt_hp705a_;
 
     // Per-channel state tracking
     static SensorState channel_states_[16];
@@ -633,6 +639,12 @@ public:
                         uint16_t ppr = (channels[i].peripheral_pin1 == 255) ? 1 : channels[i].peripheral_pin1;
                         pcnt_.begin(channels[i].gpio_pin, PCNT_UNIT_0, ppr);
                         channel_states_[channels[i].channel_id].initialized = true;
+                    } else if (channels[i].sensor_type == 31) { // SENSOR_HP705A
+                        // pulses_per_rev stored in peripheral_pin1
+                        uint16_t ppr = (channels[i].peripheral_pin1 == 255) ? 1 : channels[i].peripheral_pin1;
+                        // Count on rising edge (goes high on pulses)
+                        pcnt_hp705a_.begin(channels[i].gpio_pin, PCNT_UNIT_1, ppr, PCNT_COUNT_INC, PCNT_COUNT_DIS);
+                        channel_states_[channels[i].channel_id].initialized = true;
                     }
                     break;
 
@@ -682,7 +694,7 @@ public:
 
         // Check which sensors are enabled and capture their first channel_id
         // Using 255 as sentinel value for "not found"
-        uint8_t aht10_ch = 255, bmp280_ch = 255, max6675_ch = 255, pcnt_ch = 255;
+        uint8_t aht10_ch = 255, bmp280_ch = 255, max6675_ch = 255, pcnt_ch = 255, hp705a_ch = 255;
 
         for (uint8_t i = 0; i < num_channels; i++) {
             if (!channels[i].enabled) continue;
@@ -703,6 +715,9 @@ public:
             if (channels[i].acquisition_method == ACQ_PCNT) {
                 if (channels[i].sensor_type == 30 && pcnt_ch == 255) {
                     pcnt_ch = channels[i].channel_id;
+                }
+                if (channels[i].sensor_type == 31 && hp705a_ch == 255) {
+                    hp705a_ch = channels[i].channel_id;
                 }
             }
         }
@@ -787,6 +802,13 @@ public:
                 sensor_cache_.njk5002c_rpm = rpm;
             }
         }
+
+        if (hp705a_ch != 255 && channel_states_[hp705a_ch].initialized) {
+            uint16_t val;
+            if (pcnt_hp705a_.read(val)) {
+                sensor_cache_.hp705a_clamp = val;
+            }
+        }
     }
 
 private:
@@ -843,6 +865,9 @@ private:
                 if (ch.sensor_type == 30) { // SENSOR_NJK5002C
                     return (uint32_t)sensor_cache_.njk5002c_rpm;
                 }
+                if (ch.sensor_type == 31) { // SENSOR_HP705A
+                    return (uint32_t)sensor_cache_.hp705a_clamp;
+                }
                 return 0;
 
             default:
@@ -858,6 +883,7 @@ AHT10Reader Acquisition::aht10_;
 BMP280Reader Acquisition::bmp280_;
 MAX6675Reader Acquisition::max6675_;
 PCNTReader Acquisition::pcnt_;
+PCNTReader Acquisition::pcnt_hp705a_;
 SensorState Acquisition::channel_states_[16];
 bool Acquisition::sensors_initialized_ = false;
 SensorCache Acquisition::sensor_cache_;
