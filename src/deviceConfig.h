@@ -292,6 +292,12 @@ void initializeADC() {
 // Initialize output pins
 void initializeOutputs() {
     for (uint8_t i = 0; i < NUM_OUTPUTS; i++) {
+        // Skip pins that are reserved for peripherals (inputs, sensors, etc.)
+        // This prevents overwriting the configuration set by initializeDigitalInputs()
+        if (outputs[i].capabilities & OUTPUT_CAP_PERIPHERAL) {
+            continue;
+        }
+
         pinMode(outputs[i].pin_number, OUTPUT);
         digitalWrite(outputs[i].pin_number, LOW);  // Default to LOW
     }

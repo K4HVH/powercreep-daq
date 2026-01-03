@@ -660,7 +660,12 @@ public:
     static inline uint32_t read(const ChannelConfig& ch, const ChannelConfig* all_channels, uint8_t num_channels) {
         // Fast path: GPIO and ADC (most common, no state)
         if (ch.acquisition_method == ACQ_GPIO) {
-            return digitalRead(ch.gpio_pin) ? 1 : 0;
+            int state = digitalRead(ch.gpio_pin);
+            // If pull-up is used, logic is inverted (LOW = Active/1)
+            if (ch.pin_mode == PIN_MODE_INPUT_PULLUP) {
+                return (state == LOW) ? 1 : 0;
+            }
+            return (state == HIGH) ? 1 : 0;
         }
 
         if (ch.acquisition_method == ACQ_ADC) {
