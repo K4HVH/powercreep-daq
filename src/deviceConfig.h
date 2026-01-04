@@ -155,7 +155,7 @@ struct OutputConfig {
 ChannelConfig channels[] = {
     // B10K Potentiometer (0-3.3V on ADC)
     // Using DATA_UINT16 for ESP32 12-bit ADC (0-4095 range)
-    {0, "Pot_B10K", "", 100, ACQ_ADC, DATA_UINT16, 32, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
+    {0, "Pot_B10K", "", 100, ACQ_ADC, DATA_UINT16, 32, true, PIN_MODE_INPUT, ADC_ATTEN_0DB, 255, 255, 255, 255, 0},
 
     // 2-way switch (GPIO14, pull-up resistor, 0=pressed/LOW, 1=open/HIGH)
     // Using DATA_UINT8 for digital inputs (0=LOW, 1=HIGH)
@@ -256,35 +256,25 @@ void initializeDigitalInputs() {
 void initializeADC() {
     for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
         if (channels[i].acquisition_method == ACQ_ADC) {
-            adc_atten_t esp_atten;
+            // Use Arduino API for attenuation to ensure analogRead() respects it
+            adc_attenuation_t atten;
             switch (channels[i].adc_attenuation) {
                 case ADC_ATTEN_0DB:
-                    esp_atten = ADC_ATTEN_DB_0;
+                    atten = ADC_0db;
                     break;
                 case ADC_ATTEN_2_5DB:
-                    esp_atten = ADC_ATTEN_DB_2_5;
+                    atten = ADC_2_5db;
                     break;
                 case ADC_ATTEN_6DB:
-                    esp_atten = ADC_ATTEN_DB_6;
+                    atten = ADC_6db;
                     break;
                 case ADC_ATTEN_11DB:
                 default:
-                    esp_atten = ADC_ATTEN_DB_12;
+                    atten = ADC_11db;
                     break;
             }
-
-            adc1_channel_t adc_channel;
-            switch (channels[i].gpio_pin) {
-                case 32: adc_channel = ADC1_CHANNEL_4; break;
-                case 33: adc_channel = ADC1_CHANNEL_5; break;
-                case 34: adc_channel = ADC1_CHANNEL_6; break;
-                case 35: adc_channel = ADC1_CHANNEL_7; break;
-                case 36: adc_channel = ADC1_CHANNEL_0; break;
-                case 39: adc_channel = ADC1_CHANNEL_3; break;
-                default: continue;
-            }
-
-            adc1_config_channel_atten(adc_channel, esp_atten);
+            
+            analogSetPinAttenuation(channels[i].gpio_pin, atten);
         }
     }
 }
