@@ -541,15 +541,21 @@ public:
         // Count pulses within the sliding window (exactly WINDOW_MS)
         uint8_t valid_pulses = 0;
         unsigned long window_start = now - WINDOW_MS;
-        unsigned long oldest_pulse_time = now;
+        unsigned long oldest_pulse_in_buffer = now;
         
+        // First pass: find the oldest pulse in the entire buffer (not just valid ones)
+        for (uint8_t i = 0; i < pulse_count_; i++) {
+            uint8_t idx = (pulse_head_ + MAX_PULSE_HISTORY - pulse_count_ + i) % MAX_PULSE_HISTORY;
+            if (pulse_times_[idx] < oldest_pulse_in_buffer) {
+                oldest_pulse_in_buffer = pulse_times_[idx];
+            }
+        }
+        
+        // Second pass: count valid pulses within window
         for (uint8_t i = 0; i < pulse_count_; i++) {
             uint8_t idx = (pulse_head_ + MAX_PULSE_HISTORY - pulse_count_ + i) % MAX_PULSE_HISTORY;
             if (pulse_times_[idx] >= window_start && pulse_times_[idx] <= now) {
                 valid_pulses++;
-                if (pulse_times_[idx] < oldest_pulse_time) {
-                    oldest_pulse_time = pulse_times_[idx];
-                }
             }
         }
 
@@ -573,11 +579,16 @@ public:
             
             rpm = (uint16_t)(smoothed_rpm_ + 0.5f);  // Round to nearest integer
             last_rpm_ = rpm;
-        } else if (pulse_count_ == 0 || (now - oldest_pulse_time) > 1000) {
-            // No pulses in buffer or oldest pulse is >1 second old - stopped
+        } else if (pulse_count_ == 0 || (now - oldest_pulse_in_buffer) > 1000) {
+            // No pulses in buffer OR oldest pulse is >1 second old - stopped
             rpm = 0;
             last_rpm_ = 0;
             smoothed_rpm_ = 0.0f;
+            // Clear old pulses from buffer
+            if (pulse_count_ > 0 && (now - oldest_pulse_in_buffer) > 1000) {
+                pulse_count_ = 0;
+                pulse_head_ = 0;
+            }
         } else {
             // Not enough pulses yet, return last valid RPM
             rpm = last_rpm_;
