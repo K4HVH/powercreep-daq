@@ -419,12 +419,22 @@ public:
 
 class PCNTReader {
 private:
+    static constexpr uint8_t MAX_PULSE_HISTORY = 128;  // Track last 128 pulses (enough for 12000+ RPM over 500ms)
+    static constexpr uint16_t WINDOW_MS = 250;         // 250ms sliding window for responsive, smooth readings
+    static constexpr uint8_t MIN_PULSES = 3;           // Minimum pulses for valid RPM calculation
+    
     pcnt_unit_t pcnt_unit_;
     uint8_t gpio_pin_;
     uint16_t pulses_per_rev_;
-    unsigned long last_calc_ms_;
     int16_t last_count_;
     uint16_t last_rpm_;
+    float smoothed_rpm_;  // Exponentially smoothed RPM for continuous, smooth readings
+    
+    // Circular buffer for pulse timestamps (sliding window)
+    unsigned long pulse_times_[MAX_PULSE_HISTORY];
+    uint8_t pulse_head_;   // Next position to write
+    uint8_t pulse_count_;  // Number of valid pulses in buffer
+    unsigned long last_read_ms_;
 
 public:
     bool begin(uint8_t gpio_pin, pcnt_unit_t unit = PCNT_UNIT_0, uint16_t pulses_per_rev = 1,
@@ -433,9 +443,17 @@ public:
         gpio_pin_ = gpio_pin;
         pcnt_unit_ = unit;
         pulses_per_rev_ = pulses_per_rev;
-        last_calc_ms_ = 0;
         last_count_ = 0;
         last_rpm_ = 0;
+        smoothed_rpm_ = 0.0f;
+        pulse_head_ = 0;
+        pulse_count_ = 0;
+        last_read_ms_ = 0;
+        
+        // Clear pulse history
+        for (uint8_t i = 0; i < MAX_PULSE_HISTORY; i++) {
+            pulse_times_[i] = 0;
+        }
 
         // Configure GPIO with appropriate pull resistor BEFORE initializing PCNT
         pinMode(gpio_pin_, pin_mode);
@@ -469,13 +487,13 @@ public:
         return true;
     }
 
-    // Calculate RPM based on hardware pulse count
-    // Called at sample rate (e.g., 10Hz), uses longer 200ms window for accurate readings
-    // Requires minimum pulse count before updating to ensure accuracy
+    // Sliding window RPM calculation
+    // Tracks individual pulse timestamps and calculates RPM from pulses within last 500ms
+    // Called at 100Hz for smooth, responsive updates
     bool read(uint16_t& rpm) {
         unsigned long now = millis();
 
-        // Read hardware pulse count every time
+        // Read hardware pulse count
         int16_t count;
         if (pcnt_get_counter_value(pcnt_unit_, &count) != ESP_OK) {
             rpm = last_rpm_;
@@ -483,54 +501,85 @@ public:
         }
 
         // On first call, initialize
-        if (last_calc_ms_ == 0) {
+        if (last_read_ms_ == 0) {
             last_count_ = count;
-            last_calc_ms_ = now;
+            last_read_ms_ = now;
             rpm = 0;
             last_rpm_ = 0;
+            smoothed_rpm_ = 0.0f;
             return true;
         }
 
-        // Calculate pulses since last calculation
+        // Calculate new pulses since last read
         int16_t delta_count = count - last_count_;
         if (delta_count < 0) {
-            // Counter overflow or reset - restart measurement
+            // Counter overflow or reset - clear history and restart
+            pulse_count_ = 0;
+            pulse_head_ = 0;
             last_count_ = count;
-            last_calc_ms_ = now;
+            last_read_ms_ = now;
             rpm = last_rpm_;
             return true;
         }
 
-        unsigned long delta_ms = now - last_calc_ms_;
-
-        // Use 300ms window for excellent accuracy (more pulses = more accurate)
-        // At 5000 RPM with both edges: 166 edges/sec = ~50 edges per 300ms window
-        // At 1000 RPM with both edges: 33 edges/sec = ~10 edges per 300ms window
-        // Minimum 3 pulses required for reasonable accuracy
-        if (delta_ms >= 300 && delta_count >= 3) {
-            // Recalculate RPM: (pulses / pulses_per_rev) * (60000 ms/min / delta_ms)
-            if (pulses_per_rev_ > 0 && delta_ms > 0) {
-                rpm = (uint16_t)((delta_count * 60000UL) / (pulses_per_rev_ * delta_ms));
-                
-                // Update state only after successful calculation
-                last_count_ = count;
-                last_calc_ms_ = now;
-                last_rpm_ = rpm;
+        // Add new pulses to circular buffer with interpolated timestamps
+        // Distribute pulses evenly across the time since last read for smooth aging
+        unsigned long time_since_last = now - last_read_ms_;
+        for (int16_t i = 0; i < delta_count; i++) {
+            // Interpolate timestamp: spread pulses evenly across time_since_last
+            unsigned long pulse_time = last_read_ms_ + ((time_since_last * (i + 1)) / delta_count);
+            pulse_times_[pulse_head_] = pulse_time;
+            pulse_head_ = (pulse_head_ + 1) % MAX_PULSE_HISTORY;
+            if (pulse_count_ < MAX_PULSE_HISTORY) {
+                pulse_count_++;
             }
-        } else if (delta_ms >= 500) {
-            // If >500ms with <2 pulses, we're at very low RPM or stopped
-            // Calculate anyway to show low/zero RPM
-            if (pulses_per_rev_ > 0) {
-                rpm = (uint16_t)((delta_count * 60000UL) / (pulses_per_rev_ * delta_ms));
+        }
+        
+        last_count_ = count;
+        last_read_ms_ = now;
+
+        // Count pulses within the sliding window (exactly WINDOW_MS)
+        uint8_t valid_pulses = 0;
+        unsigned long window_start = now - WINDOW_MS;
+        unsigned long oldest_pulse_time = now;
+        
+        for (uint8_t i = 0; i < pulse_count_; i++) {
+            uint8_t idx = (pulse_head_ + MAX_PULSE_HISTORY - pulse_count_ + i) % MAX_PULSE_HISTORY;
+            if (pulse_times_[idx] >= window_start && pulse_times_[idx] <= now) {
+                valid_pulses++;
+                if (pulse_times_[idx] < oldest_pulse_time) {
+                    oldest_pulse_time = pulse_times_[idx];
+                }
+            }
+        }
+
+        // Calculate RPM from valid pulses in sliding window
+        // Always use WINDOW_MS as the time base for smooth, consistent averaging
+        if (valid_pulses >= MIN_PULSES && pulses_per_rev_ > 0) {
+            // RPM = (pulses / pulses_per_rev) * (60000 ms/min / WINDOW_MS)
+            // Use 64-bit intermediate to prevent overflow at high RPM
+            float raw_rpm = (valid_pulses * 60000.0f) / (pulses_per_rev_ * WINDOW_MS);
+            
+            // Apply exponential moving average for smooth continuous readings
+            // Alpha = 0.3 gives good balance between responsiveness and smoothness
+            const float alpha = 0.3f;
+            if (smoothed_rpm_ == 0.0f) {
+                // First valid reading - initialize smoothed value
+                smoothed_rpm_ = raw_rpm;
             } else {
-                rpm = 0;
+                // Exponential smoothing: new_value = alpha * raw + (1 - alpha) * old
+                smoothed_rpm_ = alpha * raw_rpm + (1.0f - alpha) * smoothed_rpm_;
             }
             
-            last_count_ = count;
-            last_calc_ms_ = now;
+            rpm = (uint16_t)(smoothed_rpm_ + 0.5f);  // Round to nearest integer
             last_rpm_ = rpm;
+        } else if (pulse_count_ == 0 || (now - oldest_pulse_time) > 1000) {
+            // No pulses in buffer or oldest pulse is >1 second old - stopped
+            rpm = 0;
+            last_rpm_ = 0;
+            smoothed_rpm_ = 0.0f;
         } else {
-            // Return cached value (not enough time/pulses yet)
+            // Not enough pulses yet, return last valid RPM
             rpm = last_rpm_;
         }
 
@@ -641,10 +690,10 @@ public:
                 case ACQ_PCNT:
                     if (channels[i].sensor_type == 30) { // SENSOR_NJK5002C
                         // pulses_per_rev stored in peripheral_pin1 (typically 1 for single magnet)
-                        // Count on BOTH edges (rising + falling) for maximum accuracy
-                        // Each magnet pass creates 2 edges (LOW→HIGH and HIGH→LOW), so multiply ppr by 2
+                        // Count on FALLING edge only for clean, reliable triggering
+                        // NJK-5002C NPN output goes LOW when magnet detected
                         uint16_t ppr = (channels[i].peripheral_pin1 == 255) ? 1 : channels[i].peripheral_pin1;
-                        pcnt_.begin(channels[i].gpio_pin, PCNT_UNIT_0, ppr * 2, PCNT_COUNT_INC, PCNT_COUNT_INC, INPUT_PULLUP);
+                        pcnt_.begin(channels[i].gpio_pin, PCNT_UNIT_0, ppr, PCNT_COUNT_DIS, PCNT_COUNT_INC, INPUT_PULLUP);
                         channel_states_[channels[i].channel_id].initialized = true;
                     } else if (channels[i].sensor_type == 31) { // SENSOR_HP705A
                         // pulses_per_rev stored in peripheral_pin1

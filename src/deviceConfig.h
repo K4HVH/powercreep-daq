@@ -194,19 +194,19 @@ ChannelConfig channels[] = {
 
     // NJK-5002C Hall Effect RPM Sensor (PCNT, signal on GPIO26)
     // Using DATA_UINT16 for RPM (0-65535 range)
-    // Sample rate: 10Hz (100ms updates for stable, accurate readings)
+    // Sample rate: 100Hz (10ms checks for responsive updates, 500ms smoothing window)
     // Hardware PCNT counter for 0-12000 RPM range
     // NPN output pulls LOW on magnet detection (count on falling edge)
     // REQUIRES PULL-UP: NPN sensor needs pull-up resistor for proper HIGH state
     // peripheral_pin1 = pulses_per_revolution (1 for single magnet setup)
-    {10, "NJK5002C_RPM", "RPM", 10, ACQ_PCNT, DATA_UINT16, 26, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 1, 255, 255, 255, 30},
+    {10, "NJK5002C_RPM", "RPM", 100, ACQ_PCNT, DATA_UINT16, 26, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 1, 255, 255, 255, 30},
 
     // HP705A Clamp (Pulse output on GPIO34)
     // Using DATA_UINT16 for value
     // Sample rate: 10Hz
     // REQUIRES PULL-DOWN: Active-high output needs pull-down resistor for proper LOW state
     // peripheral_pin1 = pulses_per_unit (1 = CPM, 60 = Hz)
-    {11, "HP705A_Pulse", "PPM", 10, ACQ_PCNT, DATA_UINT16, 34, true, PIN_MODE_INPUT_PULLDOWN, ADC_ATTEN_11DB, 1, 255, 255, 255, 31},
+    {11, "HP705A_Pulse", "PPM", 100, ACQ_PCNT, DATA_UINT16, 34, true, PIN_MODE_INPUT_PULLDOWN, ADC_ATTEN_11DB, 1, 255, 255, 255, 31},
 };
 
 constexpr uint8_t NUM_CHANNELS = sizeof(channels) / sizeof(channels[0]);
