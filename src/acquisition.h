@@ -439,7 +439,7 @@ private:
 public:
     bool begin(uint8_t gpio_pin, pcnt_unit_t unit = PCNT_UNIT_0, uint16_t pulses_per_rev = 1,
                pcnt_count_mode_t pos_mode = PCNT_COUNT_DIS, pcnt_count_mode_t neg_mode = PCNT_COUNT_INC,
-               uint8_t pin_mode = INPUT_PULLUP) {
+               uint8_t pin_mode = INPUT_PULLUP, uint16_t filter_value = 0) {
         gpio_pin_ = gpio_pin;
         pcnt_unit_ = unit;
         pulses_per_rev_ = pulses_per_rev;
@@ -475,10 +475,16 @@ public:
             return false;
         }
 
-        // DISABLE filter entirely for maximum pulse capture at high RPM (10000+ RPM)
-        // This ensures we capture every single edge transition without loss
-        // If readings become noisy/jittery, re-enable with: pcnt_set_filter_value(pcnt_unit_, 10);
-        pcnt_filter_disable(pcnt_unit_);
+        // Configure glitch filter if specified
+        // Filter value = number of APB clock cycles (80MHz) a pulse must be stable
+        // filter_value=100 = ~1.25µs glitch filter (good for noisy signals)
+        // filter_value=0 = disabled (for clean high-speed signals like RPM sensor)
+        if (filter_value > 0) {
+            pcnt_set_filter_value(pcnt_unit_, filter_value);
+            pcnt_filter_enable(pcnt_unit_);
+        } else {
+            pcnt_filter_disable(pcnt_unit_);
+        }
 
         // Clear and start counter
         pcnt_counter_clear(pcnt_unit_);
@@ -704,13 +710,18 @@ public:
                         // Count on FALLING edge only for clean, reliable triggering
                         // NJK-5002C NPN output goes LOW when magnet detected
                         uint16_t ppr = (channels[i].peripheral_pin1 == 255) ? 1 : channels[i].peripheral_pin1;
-                        pcnt_.begin(channels[i].gpio_pin, PCNT_UNIT_0, ppr, PCNT_COUNT_DIS, PCNT_COUNT_INC, INPUT_PULLUP);
+                        uint8_t pin_mode = (channels[i].pin_mode == PIN_MODE_INPUT_PULLUP) ? INPUT_PULLUP :
+                                          (channels[i].pin_mode == PIN_MODE_INPUT_PULLDOWN) ? INPUT_PULLDOWN : INPUT;
+                        pcnt_.begin(channels[i].gpio_pin, PCNT_UNIT_0, ppr, PCNT_COUNT_DIS, PCNT_COUNT_INC, pin_mode);
                         channel_states_[channels[i].channel_id].initialized = true;
                     } else if (channels[i].sensor_type == 31) { // SENSOR_HP705A
                         // pulses_per_rev stored in peripheral_pin1
                         uint16_t ppr = (channels[i].peripheral_pin1 == 255) ? 1 : channels[i].peripheral_pin1;
-                        // Count on rising edge (goes high on pulses) with pull-down
-                        pcnt_hp705a_.begin(channels[i].gpio_pin, PCNT_UNIT_1, ppr, PCNT_COUNT_INC, PCNT_COUNT_DIS, INPUT_PULLDOWN);
+                        // Count on RISING edge with pull-down (using external signal conditioning)
+                        // Use 1023 APB cycle filter (~12.8µs, max value) to eliminate spark ringing at high RPM
+                        uint8_t pin_mode = (channels[i].pin_mode == PIN_MODE_INPUT_PULLUP) ? INPUT_PULLUP :
+                                          (channels[i].pin_mode == PIN_MODE_INPUT_PULLDOWN) ? INPUT_PULLDOWN : INPUT;
+                        pcnt_hp705a_.begin(channels[i].gpio_pin, PCNT_UNIT_1, ppr, PCNT_COUNT_INC, PCNT_COUNT_DIS, pin_mode, 1023);
                         channel_states_[channels[i].channel_id].initialized = true;
                     }
                     break;

@@ -201,12 +201,12 @@ ChannelConfig channels[] = {
     // peripheral_pin1 = pulses_per_revolution (1 for single magnet setup)
     {10, "NJK5002C_RPM", "RPM", 100, ACQ_PCNT, DATA_UINT16, 26, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 1, 255, 255, 255, 30},
 
-    // HP705A Clamp (Pulse output on GPIO34)
+    // HP705A Clamp (Pulse output on GPIO33)
     // Using DATA_UINT16 for value
-    // Sample rate: 10Hz
-    // REQUIRES PULL-DOWN: Active-high output needs pull-down resistor for proper LOW state
+    // Sample rate: 100Hz
+    // Using PULL-DOWN with external signal conditioning circuit to boost 1V to 3.3V
     // peripheral_pin1 = pulses_per_unit (1 = CPM, 60 = Hz)
-    {11, "HP705A_Pulse", "PPM", 100, ACQ_PCNT, DATA_UINT16, 34, true, PIN_MODE_INPUT_PULLDOWN, ADC_ATTEN_11DB, 1, 255, 255, 255, 31},
+    {11, "HP705A_Pulse", "PPM", 100, ACQ_PCNT, DATA_UINT16, 33, true, PIN_MODE_INPUT_PULLDOWN, ADC_ATTEN_11DB, 1, 255, 255, 255, 31},
 };
 
 constexpr uint8_t NUM_CHANNELS = sizeof(channels) / sizeof(channels[0]);
@@ -229,7 +229,7 @@ OutputConfig outputs[] = {
     {18, "SPI_SCK", OUTPUT_CAP_PERIPHERAL},          // SPI clock (MAX6675)
     {19, "SPI_MISO", OUTPUT_CAP_PERIPHERAL},         // SPI data in (MAX6675)
     {26, "PCNT_RPM", OUTPUT_CAP_PERIPHERAL},         // PCNT input (NJK-5002C RPM)
-    {34, "PCNT_HP705A", OUTPUT_CAP_PERIPHERAL},      // PCNT input (HP705A Clamp)
+    {33, "PCNT_HP705A", OUTPUT_CAP_PERIPHERAL},      // PCNT input (HP705A Clamp)
 };
 
 constexpr uint8_t NUM_OUTPUTS = sizeof(outputs) / sizeof(outputs[0]);
