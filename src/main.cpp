@@ -43,8 +43,8 @@ uint8_t enabled_channels[NUM_CHANNELS];
 uint8_t num_enabled_channels = 0;
 
 // v3: Batch sending parameters
-constexpr uint8_t MAX_SAMPLES_PER_BATCH = 50;  // Max samples per batch
-constexpr uint32_t BATCH_SEND_INTERVAL_MS = 10;  // Send batch every 10ms even if not full (100 batches/sec)
+constexpr uint8_t MAX_SAMPLES_PER_BATCH = 5;  // Max samples per batch (low for responsiveness)
+constexpr uint32_t BATCH_SEND_INTERVAL_MS = 2;  // Send batch every 2ms for near real-time updates (500 batches/sec)
 
 void IRAM_ATTR daqTimerISR() {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
@@ -93,6 +93,22 @@ void daqTask(void* parameter) {
     while (true) {
         // Wait for timer notification (1000 Hz tick)
         if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY)) {
+
+            // Periodic batch sending FIRST (even if not full) - ensures batches sent every 2ms
+            // This prevents accumulation of samples when channels fire together
+            if (g_handshake_complete && batch_count > 0 &&
+                (millis() - last_batch_send) >= BATCH_SEND_INTERVAL_MS) {
+                FrameBuilder frame;
+                frame.begin(DATA_BATCH);
+                frame.addUint32(g_sequence_number++);
+                frame.addByte(batch_count);
+                frame.addBytes(batch_buffer, batch_bytes);
+                frame.send();
+                last_batch_send = millis();
+                g_last_data_batch_ms = last_batch_send;  // Track for heartbeat logic
+                batch_bytes = 0;
+                batch_count = 0;
+            }
 
             // Sample all enabled channels
             for (uint8_t idx = 0; idx < num_enabled_channels; idx++) {
@@ -153,22 +169,6 @@ void daqTask(void* parameter) {
                         break;
                 }
                 batch_count++;
-            }
-
-            // Periodic batch sending (even if not full) - CRITICAL for throughput
-            // Send batch every BATCH_SEND_INTERVAL_MS to ensure timely delivery
-            if (g_handshake_complete && batch_count > 0 &&
-                (millis() - last_batch_send) >= BATCH_SEND_INTERVAL_MS) {
-                FrameBuilder frame;
-                frame.begin(DATA_BATCH);
-                frame.addUint32(g_sequence_number++);
-                frame.addByte(batch_count);
-                frame.addBytes(batch_buffer, batch_bytes);
-                frame.send();
-                last_batch_send = millis();
-                g_last_data_batch_ms = last_batch_send;  // Track for heartbeat logic
-                batch_bytes = 0;
-                batch_count = 0;
             }
 
             tick_count++;

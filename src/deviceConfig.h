@@ -155,7 +155,7 @@ struct OutputConfig {
 ChannelConfig channels[] = {
     // B10K Potentiometer (0-3.3V on ADC)
     // Using DATA_UINT16 for ESP32 12-bit ADC (0-4095 range)
-    {0, "Pot_B10K", "", 100, ACQ_ADC, DATA_UINT16, 32, true, PIN_MODE_INPUT, ADC_ATTEN_0DB, 255, 255, 255, 255, 0},
+    {0, "Pot_B10K", "", 100, ACQ_ADC, DATA_UINT16, 32, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 255, 255, 255, 255, 0},
 
     // 2-way switch (GPIO14, pull-up resistor, 0=pressed/LOW, 1=open/HIGH)
     // Using DATA_UINT8 for digital inputs (0=LOW, 1=HIGH)
@@ -194,17 +194,19 @@ ChannelConfig channels[] = {
 
     // NJK-5002C Hall Effect RPM Sensor (PCNT, signal on GPIO26)
     // Using DATA_UINT16 for RPM (0-65535 range)
-    // Sample rate: 50Hz (20ms updates, adaptive internal accumulation for accuracy)
+    // Sample rate: 10Hz (100ms updates for stable, accurate readings)
     // Hardware PCNT counter for 0-12000 RPM range
     // NPN output pulls LOW on magnet detection (count on falling edge)
+    // REQUIRES PULL-UP: NPN sensor needs pull-up resistor for proper HIGH state
     // peripheral_pin1 = pulses_per_revolution (1 for single magnet setup)
-    {10, "NJK5002C_RPM", "RPM", 50, ACQ_PCNT, DATA_UINT16, 26, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 1, 255, 255, 255, 30},
+    {10, "NJK5002C_RPM", "RPM", 10, ACQ_PCNT, DATA_UINT16, 26, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 1, 255, 255, 255, 30},
 
     // HP705A Clamp (Pulse output on GPIO34)
     // Using DATA_UINT16 for value
-    // Sample rate: 50Hz
+    // Sample rate: 10Hz
+    // REQUIRES PULL-DOWN: Active-high output needs pull-down resistor for proper LOW state
     // peripheral_pin1 = pulses_per_unit (1 = CPM, 60 = Hz)
-    {11, "HP705A_Pulse", "PPM", 50, ACQ_PCNT, DATA_UINT16, 34, true, PIN_MODE_INPUT, ADC_ATTEN_11DB, 1, 255, 255, 255, 31},
+    {11, "HP705A_Pulse", "PPM", 10, ACQ_PCNT, DATA_UINT16, 34, true, PIN_MODE_INPUT_PULLDOWN, ADC_ATTEN_11DB, 1, 255, 255, 255, 31},
 };
 
 constexpr uint8_t NUM_CHANNELS = sizeof(channels) / sizeof(channels[0]);

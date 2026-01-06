@@ -428,7 +428,8 @@ private:
 
 public:
     bool begin(uint8_t gpio_pin, pcnt_unit_t unit = PCNT_UNIT_0, uint16_t pulses_per_rev = 1,
-               pcnt_count_mode_t pos_mode = PCNT_COUNT_DIS, pcnt_count_mode_t neg_mode = PCNT_COUNT_INC) {
+               pcnt_count_mode_t pos_mode = PCNT_COUNT_DIS, pcnt_count_mode_t neg_mode = PCNT_COUNT_INC,
+               uint8_t pin_mode = INPUT_PULLUP) {
         gpio_pin_ = gpio_pin;
         pcnt_unit_ = unit;
         pulses_per_rev_ = pulses_per_rev;
@@ -436,6 +437,9 @@ public:
         last_count_ = 0;
         last_rpm_ = 0;
 
+        // Configure GPIO with appropriate pull resistor BEFORE initializing PCNT
+        pinMode(gpio_pin_, pin_mode);
+        
         // Configure PCNT unit
         pcnt_config_t pcnt_config = {};
         pcnt_config.pulse_gpio_num = gpio_pin_;
@@ -453,9 +457,10 @@ public:
             return false;
         }
 
-        // Set filter to ignore glitches (1000 APB_CLK cycles ~= 12.5µs at 80MHz)
-        pcnt_set_filter_value(pcnt_unit_, 1000);
-        pcnt_filter_enable(pcnt_unit_);
+        // DISABLE filter entirely for maximum pulse capture at high RPM (10000+ RPM)
+        // This ensures we capture every single edge transition without loss
+        // If readings become noisy/jittery, re-enable with: pcnt_set_filter_value(pcnt_unit_, 10);
+        pcnt_filter_disable(pcnt_unit_);
 
         // Clear and start counter
         pcnt_counter_clear(pcnt_unit_);
@@ -465,8 +470,8 @@ public:
     }
 
     // Calculate RPM based on hardware pulse count
-    // Called at sample rate (e.g., 50Hz), uses adaptive accumulation window for accuracy
-    // Always returns a value - recalculates when enough pulses accumulated
+    // Called at sample rate (e.g., 10Hz), uses longer 200ms window for accurate readings
+    // Requires minimum pulse count before updating to ensure accuracy
     bool read(uint16_t& rpm) {
         unsigned long now = millis();
 
@@ -488,44 +493,44 @@ public:
 
         // Calculate pulses since last calculation
         int16_t delta_count = count - last_count_;
-        if (delta_count < 0) delta_count = 0; // Handle overflow
+        if (delta_count < 0) {
+            // Counter overflow or reset - restart measurement
+            last_count_ = count;
+            last_calc_ms_ = now;
+            rpm = last_rpm_;
+            return true;
+        }
 
         unsigned long delta_ms = now - last_calc_ms_;
 
-        // Adaptive minimum window for accuracy:
-        // At high RPM (>3000): need minimum 2 pulses = ~10ms at 12k RPM
-        // At medium RPM (1000-3000): need minimum 3 pulses = ~60ms at 1k RPM
-        // At low RPM (<1000): need minimum 2 pulses = ~120ms at 500 RPM
-        bool should_recalculate = false;
-
-        if (last_rpm_ > 3000) {
-            // High RPM: recalculate if >10ms passed OR >2 pulses
-            should_recalculate = (delta_ms >= 10 && delta_count >= 2) || (delta_ms >= 20);
-        } else if (last_rpm_ > 1000) {
-            // Medium RPM: recalculate if >60ms passed OR >3 pulses
-            should_recalculate = (delta_ms >= 60 && delta_count >= 3) || (delta_ms >= 100);
-        } else if (last_rpm_ > 300) {
-            // Low RPM: recalculate if >120ms passed OR >2 pulses
-            should_recalculate = (delta_ms >= 120 && delta_count >= 2) || (delta_ms >= 200);
-        } else {
-            // Very low RPM: recalculate every 500ms minimum
-            should_recalculate = (delta_ms >= 500);
-        }
-
-        if (should_recalculate && delta_ms > 0) {
+        // Use 300ms window for excellent accuracy (more pulses = more accurate)
+        // At 5000 RPM with both edges: 166 edges/sec = ~50 edges per 300ms window
+        // At 1000 RPM with both edges: 33 edges/sec = ~10 edges per 300ms window
+        // Minimum 3 pulses required for reasonable accuracy
+        if (delta_ms >= 300 && delta_count >= 3) {
             // Recalculate RPM: (pulses / pulses_per_rev) * (60000 ms/min / delta_ms)
+            if (pulses_per_rev_ > 0 && delta_ms > 0) {
+                rpm = (uint16_t)((delta_count * 60000UL) / (pulses_per_rev_ * delta_ms));
+                
+                // Update state only after successful calculation
+                last_count_ = count;
+                last_calc_ms_ = now;
+                last_rpm_ = rpm;
+            }
+        } else if (delta_ms >= 500) {
+            // If >500ms with <2 pulses, we're at very low RPM or stopped
+            // Calculate anyway to show low/zero RPM
             if (pulses_per_rev_ > 0) {
                 rpm = (uint16_t)((delta_count * 60000UL) / (pulses_per_rev_ * delta_ms));
             } else {
                 rpm = 0;
             }
-
-            // Update state
+            
             last_count_ = count;
             last_calc_ms_ = now;
             last_rpm_ = rpm;
         } else {
-            // Return cached value (not enough data yet for accurate update)
+            // Return cached value (not enough time/pulses yet)
             rpm = last_rpm_;
         }
 
@@ -636,14 +641,16 @@ public:
                 case ACQ_PCNT:
                     if (channels[i].sensor_type == 30) { // SENSOR_NJK5002C
                         // pulses_per_rev stored in peripheral_pin1 (typically 1 for single magnet)
+                        // Count on BOTH edges (rising + falling) for maximum accuracy
+                        // Each magnet pass creates 2 edges (LOW→HIGH and HIGH→LOW), so multiply ppr by 2
                         uint16_t ppr = (channels[i].peripheral_pin1 == 255) ? 1 : channels[i].peripheral_pin1;
-                        pcnt_.begin(channels[i].gpio_pin, PCNT_UNIT_0, ppr);
+                        pcnt_.begin(channels[i].gpio_pin, PCNT_UNIT_0, ppr * 2, PCNT_COUNT_INC, PCNT_COUNT_INC, INPUT_PULLUP);
                         channel_states_[channels[i].channel_id].initialized = true;
                     } else if (channels[i].sensor_type == 31) { // SENSOR_HP705A
                         // pulses_per_rev stored in peripheral_pin1
                         uint16_t ppr = (channels[i].peripheral_pin1 == 255) ? 1 : channels[i].peripheral_pin1;
-                        // Count on rising edge (goes high on pulses)
-                        pcnt_hp705a_.begin(channels[i].gpio_pin, PCNT_UNIT_1, ppr, PCNT_COUNT_INC, PCNT_COUNT_DIS);
+                        // Count on rising edge (goes high on pulses) with pull-down
+                        pcnt_hp705a_.begin(channels[i].gpio_pin, PCNT_UNIT_1, ppr, PCNT_COUNT_INC, PCNT_COUNT_DIS, INPUT_PULLDOWN);
                         channel_states_[channels[i].channel_id].initialized = true;
                     }
                     break;
