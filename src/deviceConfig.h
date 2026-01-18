@@ -198,8 +198,8 @@ ChannelConfig channels[] = {
     // Hardware PCNT counter for 0-12000 RPM range
     // NPN output pulls LOW on magnet detection (count on falling edge)
     // REQUIRES PULL-UP: NPN sensor needs pull-up resistor for proper HIGH state
-    // peripheral_pin1 = pulses_per_revolution (1 for single magnet setup)
-    {10, "NJK5002C_RPM", "RPM", 100, ACQ_PCNT, DATA_UINT16, 26, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 1, 255, 255, 255, 30},
+    // peripheral_pin1 = pulses_per_revolution (12 for 12-magnet sensor disk)
+    {10, "NJK5002C_RPM", "RPM", 100, ACQ_PCNT, DATA_UINT16, 26, true, PIN_MODE_INPUT_PULLUP, ADC_ATTEN_11DB, 12, 255, 255, 255, 30},
 
     // HP705A Clamp (Pulse output on GPIO33)
     // Using DATA_UINT16 for value

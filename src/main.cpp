@@ -17,10 +17,6 @@ TaskHandle_t commTaskHandle = NULL;
 TaskHandle_t daqTaskHandle = NULL;
 TaskHandle_t sensorPollingTaskHandle = NULL;
 
-// v3: No queue needed - DAQ task sends DATA_BATCH frames directly via Serial
-// This eliminates inter-core communication overhead
-// v3.1: Sensor polling moved to background task to avoid I2C/SPI timeout impact
-
 // Heartbeat state
 Heartbeat heartbeat;
 

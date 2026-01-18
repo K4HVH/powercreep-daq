@@ -419,9 +419,9 @@ public:
 
 class PCNTReader {
 private:
-    static constexpr uint8_t MAX_PULSE_HISTORY = 128;  // Track last 128 pulses (enough for 12000+ RPM over 500ms)
-    static constexpr uint16_t WINDOW_MS = 250;         // 250ms sliding window for responsive, smooth readings
-    static constexpr uint8_t MIN_PULSES = 3;           // Minimum pulses for valid RPM calculation
+    static constexpr uint16_t MAX_PULSE_HISTORY = 900;  // Track last 900 pulses (16000 RPM × 12 magnets × 0.25s = 800 pulses, 900 for headroom)
+    static constexpr uint16_t WINDOW_MS = 250;          // 250ms sliding window for responsive, smooth readings
+    static constexpr uint8_t MIN_PULSES = 3;            // Minimum pulses for valid RPM calculation
     
     pcnt_unit_t pcnt_unit_;
     uint8_t gpio_pin_;
@@ -432,8 +432,8 @@ private:
     
     // Circular buffer for pulse timestamps (sliding window)
     unsigned long pulse_times_[MAX_PULSE_HISTORY];
-    uint8_t pulse_head_;   // Next position to write
-    uint8_t pulse_count_;  // Number of valid pulses in buffer
+    uint16_t pulse_head_;   // Next position to write
+    uint16_t pulse_count_;  // Number of valid pulses in buffer
     unsigned long last_read_ms_;
 
 public:
@@ -451,7 +451,7 @@ public:
         last_read_ms_ = 0;
         
         // Clear pulse history
-        for (uint8_t i = 0; i < MAX_PULSE_HISTORY; i++) {
+        for (uint16_t i = 0; i < MAX_PULSE_HISTORY; i++) {
             pulse_times_[i] = 0;
         }
 
@@ -545,21 +545,21 @@ public:
         last_read_ms_ = now;
 
         // Count pulses within the sliding window (exactly WINDOW_MS)
-        uint8_t valid_pulses = 0;
+        uint16_t valid_pulses = 0;
         unsigned long window_start = now - WINDOW_MS;
         unsigned long oldest_pulse_in_buffer = now;
         
         // First pass: find the oldest pulse in the entire buffer (not just valid ones)
-        for (uint8_t i = 0; i < pulse_count_; i++) {
-            uint8_t idx = (pulse_head_ + MAX_PULSE_HISTORY - pulse_count_ + i) % MAX_PULSE_HISTORY;
+        for (uint16_t i = 0; i < pulse_count_; i++) {
+            uint16_t idx = (pulse_head_ + MAX_PULSE_HISTORY - pulse_count_ + i) % MAX_PULSE_HISTORY;
             if (pulse_times_[idx] < oldest_pulse_in_buffer) {
                 oldest_pulse_in_buffer = pulse_times_[idx];
             }
         }
         
         // Second pass: count valid pulses within window
-        for (uint8_t i = 0; i < pulse_count_; i++) {
-            uint8_t idx = (pulse_head_ + MAX_PULSE_HISTORY - pulse_count_ + i) % MAX_PULSE_HISTORY;
+        for (uint16_t i = 0; i < pulse_count_; i++) {
+            uint16_t idx = (pulse_head_ + MAX_PULSE_HISTORY - pulse_count_ + i) % MAX_PULSE_HISTORY;
             if (pulse_times_[idx] >= window_start && pulse_times_[idx] <= now) {
                 valid_pulses++;
             }
@@ -718,10 +718,10 @@ public:
                         // pulses_per_rev stored in peripheral_pin1
                         uint16_t ppr = (channels[i].peripheral_pin1 == 255) ? 1 : channels[i].peripheral_pin1;
                         // Count on RISING edge with pull-down (using external signal conditioning)
-                        // Use 1023 APB cycle filter (~12.8µs, max value) to eliminate spark ringing at high RPM
+                        // Use 200 APB cycle filter (~2.5µs) to eliminate spark ringing at high RPM
                         uint8_t pin_mode = (channels[i].pin_mode == PIN_MODE_INPUT_PULLUP) ? INPUT_PULLUP :
                                           (channels[i].pin_mode == PIN_MODE_INPUT_PULLDOWN) ? INPUT_PULLDOWN : INPUT;
-                        pcnt_hp705a_.begin(channels[i].gpio_pin, PCNT_UNIT_1, ppr, PCNT_COUNT_INC, PCNT_COUNT_DIS, pin_mode, 1023);
+                        pcnt_hp705a_.begin(channels[i].gpio_pin, PCNT_UNIT_1, ppr, PCNT_COUNT_INC, PCNT_COUNT_DIS, pin_mode, 200);
                         channel_states_[channels[i].channel_id].initialized = true;
                     }
                     break;
